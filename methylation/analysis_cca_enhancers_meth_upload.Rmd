@@ -1,0 +1,1344 @@
+---
+title: "CCA enhancers project: Methylation analysis"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+---
+
+
+
+
+# Preprocessing
+
+```{r}
+library(minfi)
+library(wateRmelon)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(GenomicRanges)
+
+annotation = getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19) # 866836
+
+### read one batch
+targets <- read.metharray.sheet("directory/", pattern="filename.csv")
+RGset <- read.metharray.exp(targets = targets)
+
+# do NOOB background correction 
+set.seed(1234)
+MSet.norm <- preprocessNoob(RGset)
+betas_new1 <- getBeta(MSet.norm) 
+colnames(betas_new1) <- targets$Sample_Name
+
+# BMIQ normalization
+betas_typeI_probes = intersect(rownames(betas_new1), rownames(annotation)[annotation$Type=="I"]) # 142181
+betas_typeII_probes = intersect(rownames(betas_new1), rownames(annotation)[annotation$Type=="II"]) # 723910
+hist(betas_new1[rownames(betas_new1) %in% betas_typeI_probes, 1:3], breaks=100, col=rgb(1,0,0,.5), ylim=c(0,250000))
+hist(betas_new1[rownames(betas_new1) %in% betas_typeII_probes, 1:3], breaks=100, add=T, col=rgb(0,0,1,.5)) # must normalize!
+probedesign = sapply(annotation[rownames(betas_new1), "Type"], function(x){ if (x=="I") { 1} else {2} } ) # 866091
+output_bmiq = apply(betas_new1, 2, function(x){BMIQ(x, probedesign)})
+output_bmiq = lapply(output_bmiq, function(x){x$nbeta})
+betas_bmiq = do.call(cbind, output_bmiq) # 866091 x 4
+hist(betas_bmiq[rownames(betas_bmiq) %in% betas_typeI_probes, 1:3], breaks=100, col=rgb(1,0,0,.5), ylim=c(0,250000))
+hist(betas_bmiq[rownames(betas_bmiq) %in% betas_typeII_probes, 1:3], breaks=100, add=T, col=rgb(0,0,1,.5)) 
+betas_new1 = betas_bmiq # 866091 x 4
+betas_new1 = betas_new1[, c("696T"), drop=F]
+
+# get detection P values
+detP_new1 <- detectionP(RGset)
+colnames(detP_new1) <- targets$Sample_Name
+detP_new1 = detP_new1[, c("696T"), drop=F]
+rm(list=c("targets", "RGset", "MSet.norm", "betas_typeI_probes", "betas_typeII_probes", "probedesign", "output_bmiq", "betas_bmiq"))
+
+
+#### read additional batches 
+
+#### combine batches
+betas_new = cbind(cbind(betas_new1, betas_new2), betas_new3) # 866091 x 19
+detP_new = cbind(cbind(detP_new1, detP_new2), detP_new3)  # 866091 x 19
+
+
+# find probes that failed to hybridize (high detection P-val)
+detP.failed.probes = apply(detP_new, 1, function(x){sum(x >= .05) > 0}) # 3258
+betas_new <- betas_new[!detP.failed.probes,] # 862833
+rm(list=c("detP_new", "detP_new1", "detP_new2", "detP_new3", "detP.failed.probes"))
+
+# remove snps
+snps <- getSnpInfo(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+snps.probes <- rownames(snps[!is.na(snps$CpG_rs) | !is.na(snps$SBE_rs),] ) # 30507
+betas_new = betas_new[!rownames(betas_new) %in% snps.probes,] # Remove snp probes: 833330
+rm(snps)
+rm(snps.probes)
+
+#Remove sex chromosomes
+sexchroms.probes <- rownames(annotation[annotation$chr %in% c("chrX","chrY"),]) # 19681
+betas_new <- betas_new[!rownames(betas_new) %in% sexchroms.probes,] # 814448
+rm(sexchroms.probes)
+
+# remove non-cg probes
+betas_new = betas_new[grep("^cg", rownames(betas_new)),] # keep only "cg" probes: 811639
+betas_new = betas_new[rownames(betas_new) %in% rownames(annotation),] # remove probes not in annotation: 811639
+norm_samps_new = c("260418N", "807N", "3011118N", "4081118N", "Z12244N", "Z12265N", "Z12267N")
+annotation_new = annotation[rownames(annotation) %in% rownames(betas_new),] # 811639
+
+# extract mvals
+mvals_new = apply(betas_new, 2, function(x){
+  sapply(x, function(y){
+    log2(y/(1-y))
+  })
+}) #  811639 x 19
+
+
+```
+
+
+
+# Combine 450k and EPIC data
+```{r}
+
+library(GenomicRanges)
+library(RPMM)
+library(gplots)
+library(ggplot2)
+
+# read data
+load("20190110_cca_enhancers_meth.RData")
+load("20190405_cca_enhancers_meth_taiwan.RData")
+samples_data = read.table("../2019.08.05_samples_data.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+colnames(samples_data)[1] = "Sample"
+
+# make sure all samples are in samples_data
+print(paste0("all samples from betas in samples_data: ", sum(!colnames(betas) %in% samples_data$Sample) == 0))
+print(paste0("all samples from betas_new in samples_data: ", sum(!colnames(betas_new) %in% samples_data$Sample) == 0))
+
+
+# take intersection of cpgs
+common_cpgs = intersect(rownames(betas), rownames(betas_new))
+print(paste0("Old data (450k) probes = ", nrow(betas), ", new data (850k) probes = ", nrow(betas_new)))
+print(paste0("Common probes = ", length(common_cpgs)))
+
+betas = betas[common_cpgs,]
+betas_new = betas_new[common_cpgs,]
+betas = cbind(betas, betas_new)
+annotation = annotation[common_cpgs,]
+norm_samps = c(norm_samps, norm_samps_new)
+
+```
+
+
+
+# Unsupervised clustering
+```{r}
+
+### Clustering: run RPMM
+# Don't include normals in clustering.
+sd_list <- apply(betas[, !colnames(betas) %in% norm_samps],1,sd)
+betas_top1pSD <- betas[, !colnames(betas) %in% norm_samps][order(sd_list, decreasing=T)[1:5000],] 
+set.seed(1021)
+rpmm_betas <- blcTree(t(betas_top1pSD), verbose=0, splitCriterion=blcSplitCriterionLevelWtdBIC)
+rpmmClass_betas <- blcTreeLeafClasses(rpmm_betas)
+bluclus_samples <- colnames(betas_top1pSD)[which(rpmmClass_betas=="rRL")] # old meth cluster 1
+orgclus_samples <- colnames(betas_top1pSD)[which(rpmmClass_betas=="rRR")] # old meth cluster 2
+grnclus_samples <- colnames(betas_top1pSD)[which(rpmmClass_betas=="rLR")] # old meth cluster 3
+redclus_samples <- colnames(betas_top1pSD)[which(rpmmClass_betas=="rLL")] # old meth cluster 4
+meth_clusters = data.frame(Sample=c(bluclus_samples, orgclus_samples, grnclus_samples, redclus_samples), 
+                           cluster=c(rep("blu",length(bluclus_samples)), rep("org",length(orgclus_samples)), rep("grn",length(grnclus_samples)),
+                                     rep("red",length(redclus_samples))), stringsAsFactors = F)
+```
+
+
+
+# get hypermethylated CpGs in each cluster
+```{r}
+
+mvals = apply(betas, 2, function(x){
+  sapply(x, function(y){
+    log2(y/(1-y))
+  })
+}) 
+
+blu_pvals <- apply(mvals, 1, function(x){t.test(x[bluclus_samples], x[norm_samps])$p.value})
+blu_adj = p.adjust(blu_pvals, method="BH")
+blu_diff = apply(betas, 1, function(x){mean(x[bluclus_samples]) - mean(x[norm_samps])})
+blu_hyper = which(blu_diff > 0.2  & blu_adj < 0.05 & names(blu_diff) %in% cpgs_normNonMeth) 
+blu_hypo <- which(blu_diff < -0.2 & blu_adj < 0.05 & names(blu_diff) %in% cpgs_normMeth) 
+
+org_pvals <- apply(mvals, 1, function(x){t.test(x[orgclus_samples], x[norm_samps])$p.value})
+org_adj = p.adjust(org_pvals, method="BH")
+org_diff = apply(betas, 1, function(x){mean(x[orgclus_samples]) - mean(x[norm_samps])})
+org_hyper = which(org_diff > 0.2  & org_adj < 0.05 & names(org_diff) %in% cpgs_normNonMeth) 
+org_hypo <- which(org_diff < -0.2 & org_adj < 0.05 & names(org_diff) %in% cpgs_normMeth)
+
+red_pvals <- apply(mvals, 1, function(x){t.test(x[redclus_samples], x[norm_samps])$p.value})
+red_adj = p.adjust(red_pvals, method="BH")
+red_diff = apply(betas, 1, function(x){mean(x[redclus_samples]) - mean(x[norm_samps])})
+red_hyper = which(red_diff > 0.2  & red_adj < 0.05 & names(red_diff) %in% cpgs_normNonMeth) 
+red_hypo <- which(red_diff < -0.2 & red_adj < 0.05 & names(red_diff) %in% cpgs_normMeth) 
+
+grn_pvals <- apply(mvals, 1, function(x){t.test(x[grnclus_samples], x[norm_samps])$p.value})
+grn_adj = p.adjust(grn_pvals, method="BH")
+grn_diff = apply(betas, 1, function(x){mean(x[grnclus_samples]) - mean(x[norm_samps])})
+grn_hyper = which(grn_diff > 0.2  & grn_adj < 0.05 & names(grn_diff) %in% cpgs_normNonMeth)
+grn_hypo <- which(grn_diff < -0.2 & grn_adj < 0.05 & names(grn_diff) %in% cpgs_normMeth)
+
+```
+
+
+
+
+
+
+# Correlate methylation with enhancer
+
+```{r}
+
+
+library(GenomicRanges)
+
+
+# load old+new combined methylation data
+load("20220913_cca_enhancers_meth_combined.RData")
+
+# load somatic enhancers
+load("../Rdata_cca_k27ac_3a_somatic_enhancers.Rdata")
+```
+
+
+```{r}
+# read enhancers
+target_map = read.table("../target_gene_mapping/20190628_enhancer_target_map_noTAD_CPLW_rho.3_liberal.txt", header=T, stringsAsFactors = F) 
+
+
+# which cpgs are in enhancers?
+enhancers_gr = GRanges(seqnames=target_map$enhancer)
+enhancers_gr = unique(enhancers_gr)
+annotation$chrpos = paste0(annotation$chr, ':', annotation$pos)
+cpgs_gr = GRanges(seqnames=annotation$chrpos)
+cpgs_enhs_overlap = findOverlaps(cpgs_gr, enhancers_gr)
+
+# keep only cpgs in enhancers
+annotation_in_enh = annotation[queryHits(cpgs_enhs_overlap),]
+annotation_in_enh$enhancer = (as.character(enhancers_gr))[subjectHits(cpgs_enhs_overlap)]
+
+betas_in_enh = betas[rownames(annotation_in_enh),]
+```
+
+```{r}
+# read enhancer groups
+enhancer_groups = read.table("../2021.12.30 samples_info.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+enhancer_groups = enhancer_groups[enhancer_groups$Tissue=='Tumor',]
+enhancer_groups = enhancer_groups[enhancer_groups$Sample %in% colnames(betas),] # keep only samples with both methylation and enhancer data (which is actually all the enhancer samples)
+
+
+# get the methylation difference between each enhancer-group  vs Normal
+betas_in_enh_norm = rowMeans(betas_in_enh[, norm_samps])
+betas_in_enh_fluke = rowMeans(betas_in_enh[, enhancer_groups[enhancer_groups$EGroup=='Fluke', 'Sample']])
+betas_in_enh_c4 = rowMeans(betas_in_enh[, enhancer_groups[enhancer_groups$EGroup=='C4', 'Sample']])
+betas_in_enh_mixed = rowMeans(betas_in_enh[, enhancer_groups[enhancer_groups$EGroup=='Mixed', 'Sample']])
+
+betadiff_fluke = data.frame(betadiff = betas_in_enh_fluke - betas_in_enh_norm, row.names = names(betas_in_enh_norm))
+betadiff_c4 = data.frame(betadiff = betas_in_enh_c4 - betas_in_enh_norm, row.names = names(betas_in_enh_norm))
+betadiff_mixed = data.frame(betadiff = betas_in_enh_mixed - betas_in_enh_norm, row.names = names(betas_in_enh_norm))
+
+
+# get FDR for methylation difference between each enhancer-group vs Normal
+mvals_in_enh = apply(betas_in_enh, 2, function(x){
+  sapply(x, function(y){
+    log2(y/(1-y))
+  })
+}) 
+pvals = apply(mvals_in_enh, 1, function(x){t.test(x[enhancer_groups[enhancer_groups$EGroup=='Fluke', 'Sample']], x[norm_samps])$p.value})
+betadiff_fluke$FDR = p.adjust(pvals, method="BH")
+betadiff_fluke$hyper = betadiff_fluke$betadiff > .2 & betadiff_fluke$FDR < .05
+betadiff_fluke$hypo = betadiff_fluke$betadiff < -0.2 & betadiff_fluke$FDR < .05
+
+pvals = apply(mvals_in_enh, 1, function(x){t.test(x[enhancer_groups[enhancer_groups$EGroup=='C4', 'Sample']], x[norm_samps])$p.value})
+betadiff_c4$FDR = p.adjust(pvals, method="BH")
+betadiff_c4$hyper = betadiff_c4$betadiff > .2 & betadiff_c4$FDR < .05
+betadiff_c4$hypo = betadiff_c4$betadiff < -0.2 & betadiff_c4$FDR < .05
+
+pvals = apply(mvals_in_enh, 1, function(x){t.test(x[enhancer_groups[enhancer_groups$EGroup=='Mixed', 'Sample']], x[norm_samps])$p.value})
+betadiff_mixed$FDR = p.adjust(pvals, method="BH")
+betadiff_mixed$hyper = betadiff_mixed$betadiff > .2 & betadiff_mixed$FDR < .05
+betadiff_mixed$hypo = betadiff_mixed$betadiff < -0.2 & betadiff_mixed$FDR < .05
+
+# get relation to island for each cpg
+betadiff_fluke$Relation_to_Island = annotation_in_enh$Relation_to_Island
+betadiff_c4$Relation_to_Island = annotation_in_enh$Relation_to_Island
+betadiff_mixed$Relation_to_Island = annotation_in_enh$Relation_to_Island
+
+
+# check if each cpg is in a gained/lost enhancer
+betadiff_fluke$enhancer = annotation_in_enh$enhancer
+betadiff_c4$enhancer = annotation_in_enh$enhancer
+betadiff_mixed$enhancer = annotation_in_enh$enhancer
+
+betadiff_fluke$enh_gain = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$gain$enhancer
+betadiff_fluke$enh_lost = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$lost$enhancer
+
+betadiff_c4$enh_gain = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$gain$enhancer
+betadiff_c4$enh_lost = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$lost$enhancer
+
+betadiff_mixed$enh_gain = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$gain$enhancer
+betadiff_mixed$enh_lost = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$lost$enhancer
+
+# gained/lost enhancer: accompanied by expression change
+betadiff_fluke$enh_gain_exp = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$gain_exp$enhancer
+betadiff_fluke$enh_lost_exp = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$lost_exp$enhancer
+
+betadiff_c4$enh_gain_exp = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$gain_exp$enhancer
+betadiff_c4$enh_lost_exp = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$lost_exp$enhancer
+
+betadiff_mixed$enh_gain_exp = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$gain_exp$enhancer
+betadiff_mixed$enh_lost_exp = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$lost_exp$enhancer
+
+
+# gained/lost enhancer: accompanied by expression change & existence in cell-line
+betadiff_fluke$enh_gain_exp_enh = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$gain_exp_enh$enhancer
+betadiff_fluke$enh_lost_exp_enh = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$lost_exp_enh$enhancer
+
+betadiff_c4$enh_gain_exp_enh = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$gain_exp_enh$enhancer
+betadiff_c4$enh_lost_exp_enh = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$lost_exp_enh$enhancer
+
+betadiff_mixed$enh_gain_exp_enh = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$gain_exp_enh$enhancer
+betadiff_mixed$enh_lost_exp_enh = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$lost_exp_enh$enhancer
+
+
+# gained/lost enhancer: accompanied by expression change & existence & change in cell-line
+betadiff_fluke$enh_gain_exp_enhgain = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$gain_exp_enhgain$enhancer
+betadiff_fluke$enh_lost_exp_enhlost = betadiff_fluke$enhancer %in% somatic_enhancers$Tumor_EGroupFluke_vs_Normal$lost_exp_enhlost$enhancer
+
+betadiff_c4$enh_gain_exp_enhgain = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$gain_exp_enhgain$enhancer
+betadiff_c4$enh_lost_exp_enhlost = betadiff_c4$enhancer %in% somatic_enhancers$Tumor_EGroupC4_vs_Normal$lost_exp_enhlost$enhancer
+
+betadiff_mixed$enh_gain_exp_enhgain = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$gain_exp_enhgain$enhancer
+betadiff_mixed$enh_lost_exp_enhlost = betadiff_mixed$enhancer %in% somatic_enhancers$Tumor_EGroupMixed_vs_Normal$lost_exp_enhlost$enhancer
+
+```
+
+
+```{r}
+# build a similar dataframe, but this time with one row per enhancer (instead of one row per cpg in betadiff). 
+# if any of the cpgs in the enhancer is hyper, then set that enhancer to hyper. Likewise hypo.
+# if any of the cpgs in the enhancer is island, then set to island. similarly shore
+# set beta difference to the average
+collapse_enh_rows = function (x){
+  if (nrow(x)==1) {
+    return (x[1,])
+  }
+  else {
+    result = x[1,]
+    result$hyper = any(x$hyper)
+    result$hypo = any(x$hypo)
+    result$betadiff = mean(x$betadiff)
+    
+    if ("Island" %in% x$Relation_to_Island) {
+      result$Relation_to_Island = "Island"
+    }
+    else if ("N_Shore" %in% x$Relation_to_Island) {
+      result$Relation_to_Island = "N_Shore"
+    }
+    else if ("S_Shore" %in% x$Relation_to_Island) {
+      result$Relation_to_Island = "S_Shore"
+    }
+    else if ("N_Shelf" %in% x$Relation_to_Island) {
+      result$Relation_to_Island = "N_Shelf"
+    }
+    else if ("S_Shelf" %in% x$Relation_to_Island) {
+      result$Relation_to_Island = "S_Shelf"
+    }
+    else {
+      result$Relation_to_Island = "OpenSea" 
+    }
+    return (result)
+  }
+}
+
+## fluke
+enhdiff_fluke = betadiff_fluke[, c("betadiff", "hyper", "hypo", "enhancer", "enh_gain", "enh_gain_exp", "enh_gain_exp_enh", "enh_gain_exp_enhgain",
+                                   "enh_lost", "enh_lost_exp", "enh_lost_exp_enh", "enh_lost_exp_enhlost", "Relation_to_Island")]
+enhdiff_fluke = split(enhdiff_fluke, enhdiff_fluke$enhancer)
+enhdiff_fluke = do.call(rbind, lapply(enhdiff_fluke, collapse_enh_rows))
+rownames(enhdiff_fluke) = enhdiff_fluke$enhancer
+
+## c4
+enhdiff_c4 = betadiff_c4[, c("betadiff", "hyper", "hypo", "enhancer", "enh_gain", "enh_gain_exp", "enh_gain_exp_enh", "enh_gain_exp_enhgain",
+                             "enh_lost", "enh_lost_exp", "enh_lost_exp_enh", "enh_lost_exp_enhlost", "Relation_to_Island")]
+enhdiff_c4 = split(enhdiff_c4, enhdiff_c4$enhancer)
+enhdiff_c4 = do.call(rbind, lapply(enhdiff_c4, collapse_enh_rows))
+rownames(enhdiff_c4) = enhdiff_c4$enhancer
+
+## mixed
+enhdiff_mixed = betadiff_mixed[, c("betadiff", "hyper", "hypo", "enhancer", "enh_gain", "enh_gain_exp", "enh_gain_exp_enh", "enh_gain_exp_enhgain",
+                                   "enh_lost", "enh_lost_exp", "enh_lost_exp_enh", "enh_lost_exp_enhlost", "Relation_to_Island")]
+enhdiff_mixed = split(enhdiff_mixed, enhdiff_mixed$enhancer)
+enhdiff_mixed = do.call(rbind, lapply(enhdiff_mixed, collapse_enh_rows))
+rownames(enhdiff_mixed) = enhdiff_mixed$enhancer
+
+```
+
+```{r}
+### considering only island/shore CpGs
+betadiff_fluke_is = betadiff_fluke[betadiff_fluke$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+betadiff_c4_is = betadiff_c4[betadiff_c4$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+betadiff_mixed_is = betadiff_mixed[betadiff_mixed$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+
+enhdiff_fluke_is = enhdiff_fluke[enhdiff_fluke$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+enhdiff_c4_is = enhdiff_c4[enhdiff_c4$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+enhdiff_mixed_is = enhdiff_mixed[enhdiff_mixed$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),]
+
+```
+
+
+
+
+
+
+```{r fig.width=6, fig.asp=1.3}
+#  plot betadiff of gained enhancers vs lost enhancers, do wilcox test
+library(ggplot2)
+
+boxplot(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain,]$betadiff, enhdiff_fluke_is[enhdiff_fluke_is$enh_lost,]$betadiff, 
+        enhdiff_c4_is[enhdiff_c4_is$enh_gain,]$betadiff, enhdiff_c4_is[enhdiff_c4_is$enh_lost,]$betadiff, 
+        enhdiff_mixed_is[enhdiff_mixed_is$enh_gain,]$betadiff, enhdiff_mixed_is[enhdiff_mixed_is$enh_lost,]$betadiff, 
+        notch=F)
+
+boxplot(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp,]$betadiff, enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp,]$betadiff, 
+        enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp,]$betadiff, enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp,]$betadiff, 
+        enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp,]$betadiff, enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp,]$betadiff, 
+        notch=F)
+
+boxplot(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp_enh,]$betadiff, enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp_enh,]$betadiff, 
+        enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp_enh,]$betadiff, enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp_enh,]$betadiff, 
+        enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp_enh,]$betadiff, enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp_enh,]$betadiff, 
+        notch=F)
+
+boxplot(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp_enhgain,]$betadiff, enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp_enhlost,]$betadiff, 
+        enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp_enhgain,]$betadiff, enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp_enhlost,]$betadiff, 
+        enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp_enhgain,]$betadiff, enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp_enhlost,]$betadiff, 
+        notch=F)
+
+wilcox.test(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain,]$betadiff, enhdiff_fluke_is[enhdiff_fluke_is$enh_lost,]$betadiff)
+wilcox.test(enhdiff_c4_is[enhdiff_c4_is$enh_gain,]$betadiff, enhdiff_c4_is[enhdiff_c4_is$enh_lost,]$betadiff)
+wilcox.test(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain,]$betadiff, enhdiff_mixed_is[enhdiff_mixed_is$enh_lost,]$betadiff)
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# # get statistics about hyper/hypo cpgs and gained/lost enhancers (among island/shore cpgs only)
+print(paste0("Considering island/shore CpGs in enhancers: ", nrow(betadiff_fluke_is), " CpGs in ", nrow(enhdiff_fluke_is), " enhancers"))
+print("Fluke")
+print(paste0("gain enh: ", sum(enhdiff_fluke_is$enh_gain)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain, "hyper"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain, "hyper"])/sum(enhdiff_fluke_is$enh_gain)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain, "hypo"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain, "hypo"])/sum(enhdiff_fluke_is$enh_gain)))
+print(paste0("lost enh: ", sum(enhdiff_fluke_is$enh_lost)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost, "hyper"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost, "hyper"])/sum(enhdiff_fluke_is$enh_lost)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost, "hypo"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost, "hypo"])/sum(enhdiff_fluke_is$enh_lost)))
+
+print("")
+print("C4")
+print(paste0("gain enh: ", sum(enhdiff_c4_is$enh_gain)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain, "hyper"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain, "hyper"])/sum(enhdiff_c4_is$enh_gain)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain, "hypo"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain, "hypo"])/sum(enhdiff_c4_is$enh_gain)))
+print(paste0("lost enh: ", sum(enhdiff_c4_is$enh_lost)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost, "hyper"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost, "hyper"])/sum(enhdiff_c4_is$enh_lost)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost, "hypo"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost, "hypo"])/sum(enhdiff_c4_is$enh_lost)))
+
+print("")
+print("Mixed")
+print(paste0("gain enh: ", sum(enhdiff_mixed_is$enh_gain)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain, "hyper"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain, "hyper"])/sum(enhdiff_mixed_is$enh_gain)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain, "hypo"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain, "hypo"])/sum(enhdiff_mixed_is$enh_gain)))
+print(paste0("lost enh: ", sum(enhdiff_mixed_is$enh_lost)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost, "hyper"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost, "hyper"])/sum(enhdiff_mixed_is$enh_lost)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost, "hypo"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost, "hypo"])/sum(enhdiff_mixed_is$enh_lost)))
+
+
+print("")
+print("---- Enhancer gain/lost accompanied by expr change ---------")
+print("Fluke")
+print(paste0("gain enh: ", sum(enhdiff_fluke_is$enh_gain_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp, "hyper"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp, "hyper"])/sum(enhdiff_fluke_is$enh_gain_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp, "hypo"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_gain_exp, "hypo"])/sum(enhdiff_fluke_is$enh_gain_exp)))
+print(paste0("lost enh: ", sum(enhdiff_fluke_is$enh_lost_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp, "hyper"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp, "hyper"])/sum(enhdiff_fluke_is$enh_lost_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp, "hypo"]), " = ", sum(enhdiff_fluke_is[enhdiff_fluke_is$enh_lost_exp, "hypo"])/sum(enhdiff_fluke_is$enh_lost_exp)))
+
+print("")
+print("C4")
+print(paste0("gain enh: ", sum(enhdiff_c4_is$enh_gain_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp, "hyper"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp, "hyper"])/sum(enhdiff_c4_is$enh_gain_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp, "hypo"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_gain_exp, "hypo"])/sum(enhdiff_c4_is$enh_gain_exp)))
+print(paste0("lost enh: ", sum(enhdiff_c4_is$enh_lost_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp, "hyper"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp, "hyper"])/sum(enhdiff_c4_is$enh_lost_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp, "hypo"]), " = ", sum(enhdiff_c4_is[enhdiff_c4_is$enh_lost_exp, "hypo"])/sum(enhdiff_c4_is$enh_lost_exp)))
+
+print("")
+print("Mixed")
+print(paste0("gain enh: ", sum(enhdiff_mixed_is$enh_gain_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp, "hyper"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp, "hyper"])/sum(enhdiff_mixed_is$enh_gain_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp, "hypo"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_gain_exp, "hypo"])/sum(enhdiff_mixed_is$enh_gain_exp)))
+print(paste0("lost enh: ", sum(enhdiff_mixed_is$enh_lost_exp)))
+print(paste0("   hyper cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp, "hyper"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp, "hyper"])/sum(enhdiff_mixed_is$enh_lost_exp)))
+print(paste0("   hypo cpgs: ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp, "hypo"]), " = ", sum(enhdiff_mixed_is[enhdiff_mixed_is$enh_lost_exp, "hypo"])/sum(enhdiff_mixed_is$enh_lost_exp)))
+```
+
+
+
+
+```{r}
+######## check association between enhancer gain vs hypomethylation, and enhancer lost vs hypermethylation
+
+## Fluke
+print("---- Fluke ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_fluke_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_fluke_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_fluke_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_fluke_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+## C4
+print("---- C4 ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_c4_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_c4_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_c4_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_c4_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+## mixed
+print("---- Mixed ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_mixed_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_mixed_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_mixed_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_mixed_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+
+#### Enhancer gain/lost accompanied by expr change
+print("--------- Enhancer gain/lost accompanied by expr change ----------")
+## Fluke
+print("---- Fluke ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_fluke_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_fluke_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_fluke_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_fluke_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+## C4
+print("---- C4 ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_c4_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_c4_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_c4_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_c4_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+## mixed
+print("---- Mixed ----")
+print("Enh gain vs hypo")
+table(factor(enhdiff_mixed_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hypo, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_mixed_is$enh_gain_exp, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hypo, levels=c("TRUE","FALSE"))), alternative="greater")
+
+print("Enh lost vs hyper")
+table(factor(enhdiff_mixed_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hyper, levels=c("TRUE","FALSE")))
+fisher.test(table(factor(enhdiff_mixed_is$enh_lost_exp, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hyper, levels=c("TRUE","FALSE"))), alternative="greater")
+
+
+
+
+### mosaic plots
+# fluke
+mosaicplot(table(factor(enhdiff_fluke_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hypo, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="Fluke group", xlab="Enhancers gained", ylab="Hypomethylation")
+
+mosaicplot(table(factor(enhdiff_fluke_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_fluke_is$hyper, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="Fluke group", xlab="Enhancers lost", ylab="Hypermethylation")
+
+
+# c4
+mosaicplot(table(factor(enhdiff_c4_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hypo, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="c4 group", xlab="Enhancers gained", ylab="Hypomethylation")
+
+mosaicplot(table(factor(enhdiff_c4_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_c4_is$hyper, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="c4 group", xlab="Enhancers lost", ylab="Hypermethylation")
+
+
+# mixed
+mosaicplot(table(factor(enhdiff_mixed_is$enh_gain, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hypo, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="mixed group", xlab="Enhancers gained", ylab="Hypomethylation")
+
+mosaicplot(table(factor(enhdiff_mixed_is$enh_lost, levels=c("TRUE","FALSE")), factor(enhdiff_mixed_is$hyper, levels=c("TRUE","FALSE"))),
+           color=c("skyblue2", "grey", "grey", "grey"), main="mixed group", xlab="Enhancers lost", ylab="Hypermethylation")
+
+```
+
+
+
+
+
+```{r}
+###### check association between enhancer gain/lost versus cpg hyper/hypo together
+
+# fluke
+enhdiff_fluke_is$cpg_status = "None"
+enhdiff_fluke_is[enhdiff_fluke_is$hyper, "cpg_status"] = "Hyper"
+enhdiff_fluke_is[enhdiff_fluke_is$hypo, "cpg_status"] = "Hypo"
+
+enhdiff_fluke_is$enh_status = "None"
+enhdiff_fluke_is[enhdiff_fluke_is$enh_gain, "enh_status"] = "Gain"
+enhdiff_fluke_is[enhdiff_fluke_is$enh_lost, "enh_status"] = "Lost"
+
+# c4
+enhdiff_c4_is$cpg_status = "None"
+enhdiff_c4_is[enhdiff_c4_is$hyper, "cpg_status"] = "Hyper"
+enhdiff_c4_is[enhdiff_c4_is$hypo, "cpg_status"] = "Hypo"
+
+enhdiff_c4_is$enh_status = "None"
+enhdiff_c4_is[enhdiff_c4_is$enh_gain, "enh_status"] = "Gain"
+enhdiff_c4_is[enhdiff_c4_is$enh_lost, "enh_status"] = "Lost"
+
+# mixed
+enhdiff_mixed_is$cpg_status = "None"
+enhdiff_mixed_is[enhdiff_mixed_is$hyper, "cpg_status"] = "Hyper"
+enhdiff_mixed_is[enhdiff_mixed_is$hypo, "cpg_status"] = "Hypo"
+
+enhdiff_mixed_is$enh_status = "None"
+enhdiff_mixed_is[enhdiff_mixed_is$enh_gain, "enh_status"] = "Gain"
+enhdiff_mixed_is[enhdiff_mixed_is$enh_lost, "enh_status"] = "Lost"
+
+
+### Fluke
+table(factor(enhdiff_fluke_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_fluke_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None")
+fisher.test(table(factor(enhdiff_fluke_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_fluke_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"))
+
+### C4
+table(factor(enhdiff_c4_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_c4_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None")
+fisher.test(table(factor(enhdiff_c4_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_c4_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"))
+
+### mixed
+table(factor(enhdiff_mixed_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_mixed_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None")
+fisher.test(table(factor(enhdiff_mixed_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_mixed_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"))
+
+# mosaic plots
+mosaicplot(table(factor(enhdiff_fluke_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_fluke_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"),
+           color="skyblue2", main="Fluke group", xlab="Enhancers", ylab="CpG methylation")
+
+mosaicplot(table(factor(enhdiff_c4_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_c4_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"),
+           color="skyblue2", main="c4 group", xlab="Enhancers", ylab="CpG methylation")
+
+mosaicplot(table(factor(enhdiff_mixed_is$enh_status, levels=c("Gain","Lost","None")), factor(enhdiff_mixed_is$cpg_status, levels=c("Hypo","Hyper","None")), exclude="None"),
+           color="skyblue2", main="mixed group", xlab="Enhancers", ylab="CpG methylation")
+```
+
+
+
+&nbsp;
+
+---------------------------------------------------
+---------------------------------------------------
+
+&nbsp;
+
+# Analyze island / shore methylation
+
+
+```{r}
+# load data
+load("20220913_cca_enhancers_meth_combined.RData")
+load("20220913_cca_enhancers_meth_combined_clusters.RData")
+```
+
+
+```{r}
+### Analyze islands with differential island/shore methylation
+
+# filter annotations: keep only CpGs that we are considering, and are unmethylated in normal, and are in island/shores 
+annotation_isl <- annotation[rownames(annotation) %in% rownames(betas) & rownames(annotation) %in% cpgs_normNonMeth & annotation$Relation_to_Island %in% c("Island", "N_Shore", "S_Shore"),c(18,19,24,25,26)] # 142163. 18372 islands
+
+# keep only islands among those CpGs we are considering, where there is at least 1 island and 1 shore probe, and most cpg island and shore probes are unmethylated in normal
+annotation_splitisland = annotation[annotation$Islands_Name %in% unique(annotation_isl$Islands_Name), c(18,19,24,25,26)]
+annotation_splitisland = split(annotation_splitisland, annotation_splitisland$Islands_Name)
+isl_normNonmeth = lapply(annotation_splitisland, function(iii){
+  isl_cpgs = rownames(iii[iii$Relation_to_Island=="Island", ])
+  sho_cpgs = rownames(iii[iii$Relation_to_Island %in% c("N_Shore", "S_Shore"), ])
+  isl_nonmeth_freq = 0
+  if (length(isl_cpgs)>0) {
+    isl_nonmeth_freq = sum(isl_cpgs %in% cpgs_normNonMeth) / length(isl_cpgs)
+  }
+  sho_nonmeth_freq = 0
+  if (length(sho_cpgs)>0) {
+    sho_nonmeth_freq = sum(sho_cpgs %in% cpgs_normNonMeth) / length(sho_cpgs)
+  }
+  c(isl_nonmeth_freq, sho_nonmeth_freq)
+})
+isl_normNonmeth.75 = unlist(lapply(isl_normNonmeth, function(x){ x[1]>=.75 & x[2]>=.75 }))
+isl_normNonmeth.75 = names(isl_normNonmeth.75)[isl_normNonmeth.75] # 5496
+rm(isl_normNonmeth)
+rm(annotation_splitisland)
+
+
+
+# get islands with cpg hypermethylation, only among islands normally unmethylated
+blu_hyper_isl <- intersect(unique(annotation_isl[rownames(annotation_isl) %in% names(blu_hyper),"Islands_Name"]), isl_normNonmeth.75) #   1381
+org_hyper_isl <- intersect(unique(annotation_isl[rownames(annotation_isl) %in% names(org_hyper),"Islands_Name"]), isl_normNonmeth.75) # 941
+red_hyper_isl <- intersect(unique(annotation_isl[rownames(annotation_isl) %in% names(red_hyper),"Islands_Name"]), isl_normNonmeth.75) #  1755
+grn_hyper_isl <- intersect(unique(annotation_isl[rownames(annotation_isl) %in% names(grn_hyper),"Islands_Name"]), isl_normNonmeth.75) #  587
+all_hyper_isl = unique(c(blu_hyper_isl, org_hyper_isl, red_hyper_isl, grn_hyper_isl)) # 1909
+
+
+# filter annotations again to keep islands with hypermethylation
+annotation_isl = annotation_isl[annotation_isl$Islands_Name %in% all_hyper_isl, ] #  19196. 1909 islands.
+annotation_isl_isl <- annotation_isl[annotation_isl$Relation_to_Island=="Island",]  #  10871.  1909 islands.
+annotation_isl_sho <- annotation_isl[annotation_isl$Relation_to_Island %in% c("S_Shore", "N_Shore"),] #  8325. 1909 islands
+
+# split annotations into islands to speed things up
+annotation_isl_isl_splitisland = split(annotation_isl_isl, annotation_isl_isl$Islands_Name)
+annotation_isl_sho_splitisland = split(annotation_isl_sho, annotation_isl_sho$Islands_Name)
+
+
+# filter and split betas to speed things up
+betas_filtered = betas[sort(unique(rownames(annotation_isl))),] #  19196 cpgs
+betas_splitisland = sapply(sort(unique(annotation_isl$Islands_Name)), function(ii){
+  cpgs = rownames(annotation_isl[annotation_isl$Islands_Name==ii,])
+  betas_filtered[cpgs,,drop=F]
+})
+names(betas_splitisland) = sort(unique(annotation_isl$Islands_Name))
+
+
+
+
+# for each SAMPLE in each cluster, calculate the mean difference between Beta of its hypermethylated island, versus Beta of that island in Normal samples 
+# Use mean of cpgs in each island region in each sample
+hyper_isl_betas_samplemeans_diffNorm = t(sapply(c(bluclus_samples,orgclus_samples, redclus_samples, grnclus_samples), function(s){
+  samp_clus = ""
+  if (s %in% bluclus_samples) { samp_clus = "BLU" 
+  } else if (s %in% orgclus_samples) { samp_clus = "ORG" 
+  } else if (s %in% redclus_samples) { samp_clus = "RED" 
+  } else if (s %in% grnclus_samples) { samp_clus = "GRN" }
+  
+  if (samp_clus=="RED") { clus_hyper_isl = red_hyper_isl
+  } else if (samp_clus=="ORG") { clus_hyper_isl = org_hyper_isl
+  } else if (samp_clus=="BLU") { clus_hyper_isl = blu_hyper_isl
+  } else if (samp_clus=="GRN") { clus_hyper_isl = grn_hyper_isl }
+  
+  isl_betas = sapply(clus_hyper_isl, function(ii){
+    ii_betas = betas_splitisland[[ii]]
+    # north shore
+    n_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="N_Shore", ]))
+    samp_nshobeta = NA
+    if (length(n_sho_cpgs)>0) {
+      samp_nshobeta = mean(ii_betas[n_sho_cpgs, s]) - mean(ii_betas[n_sho_cpgs, norm_samps])
+    }
+    # south shore
+    s_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="S_Shore", ]))
+    samp_sshobeta = NA
+    if (length(s_sho_cpgs)>0) {
+      samp_sshobeta = mean(ii_betas[s_sho_cpgs, s]) - mean(ii_betas[s_sho_cpgs, norm_samps])
+    }
+    # island
+    isl_cpgs = unique(rownames(annotation_isl_isl_splitisland[[ii]]))
+    samp_islbeta = NA
+    if (length(isl_cpgs)>0) {
+      samp_islbeta = mean(ii_betas[isl_cpgs, s]) - mean(ii_betas[isl_cpgs, norm_samps])
+    }
+    c(samp_nshobeta, samp_islbeta, samp_sshobeta)
+  })
+  if (is.null(dim(isl_betas))) { c(NA, NA, NA, NA, NA, NA)
+  } else { c(apply(isl_betas, 1, function(x){ mean(x, na.rm=T)  }),  apply(isl_betas, 1, function(x){ sd(x, na.rm=T)  })) }
+  
+}))
+colnames(hyper_isl_betas_samplemeans_diffNorm) = c("N_Shore", "Island", "S_Shore", "N_Shore_SD", "Island_SD", "S_Shore_SD")
+
+
+```
+
+
+```{r fig.width=4, fig.asp=1.5}
+# draw 
+library(beeswarm)
+atvector=c(1, 2, 3)
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,0,255,80,maxColorValue=255),
+         col=rgb(0,0,255,80,maxColorValue=255),
+         add=F, cex=1.4, corral="random", outline=F, ylim=c(0,.45), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,165,0,80,maxColorValue=255),
+         col=rgb(255,165,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F, ylim=c(0,.4), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,0,0,80,maxColorValue=255),
+         col=rgb(255,0,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,255,0,80,maxColorValue=255),
+         col=rgb(0,255,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),     
+                                  median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+         col=rgb(0,0,200,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "S_Shore"])),
+         col=rgb(255,165,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])),
+         col=rgb(200,0,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"]),     
+                                  median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "S_Shore"])),
+         col=rgb(0,200,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(255,165,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[orgclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(255,165,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,200,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[grnclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,200,0,maxColorValue=255), lwd=3)
+
+
+
+# draw only blue and red
+atvector=c(1, 2, 3)
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,0,255,80,maxColorValue=255),
+         col=rgb(0,0,255,80,maxColorValue=255),
+         add=F, cex=1.4, corral="random", outline=F, ylim=c(0,.45), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,0,0,80,maxColorValue=255),
+         col=rgb(255,0,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),     
+                                  median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+         col=rgb(0,0,200,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])),
+         col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[bluclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans_diffNorm[redclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+
+
+```
+
+
+```{r fig.width=4, fig.asp=1.5}
+
+hyper_isl_betas_samplemeans = t(sapply(c(bluclus_samples,orgclus_samples, redclus_samples, grnclus_samples, norm_samps), function(s){
+  samp_clus = ""
+  if (s %in% bluclus_samples) { samp_clus = "BLU" 
+  } else if (s %in% orgclus_samples) { samp_clus = "ORG" 
+  } else if (s %in% redclus_samples) { samp_clus = "RED" 
+  } else if (s %in% grnclus_samples) { samp_clus = "GRN" 
+  } else if (s %in% norm_samps) { samp_clus = "NORM"}
+  
+  if (samp_clus=="RED") { clus_hyper_isl = red_hyper_isl
+  } else if (samp_clus=="BLU") { clus_hyper_isl = blu_hyper_isl
+  } else if (samp_clus=="ORG") { clus_hyper_isl = org_hyper_isl
+  } else if (samp_clus=="GRN") { clus_hyper_isl = grn_hyper_isl
+  } else if (samp_clus=="NORM") { clus_hyper_isl = all_hyper_isl }
+  
+  isl_betas = sapply(clus_hyper_isl, function(ii){
+    ii_betas = betas_splitisland[[ii]]
+    # north shore
+    n_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="N_Shore", ]))
+    samp_nshobeta = NA
+    if (length(n_sho_cpgs)>0) {
+      samp_nshobeta = mean(ii_betas[n_sho_cpgs, s])
+    }
+    # south shore
+    s_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="S_Shore", ]))
+    samp_sshobeta = NA
+    if (length(s_sho_cpgs)>0) {
+      samp_sshobeta = mean(ii_betas[s_sho_cpgs, s])
+    }
+    # island
+    isl_cpgs = unique(rownames(annotation_isl_isl_splitisland[[ii]]))
+    samp_islbeta = NA
+    if (length(isl_cpgs)>0) {
+      samp_islbeta = mean(ii_betas[isl_cpgs, s])
+    }
+    c(samp_nshobeta, samp_islbeta, samp_sshobeta)
+  })
+  if (is.null(dim(isl_betas))) { c(NA, NA, NA, NA, NA, NA)
+  } else { c(apply(isl_betas, 1, function(x){ mean(x, na.rm=T)  }),  apply(isl_betas, 1, function(x){ sd(x, na.rm=T)  })) }
+  
+}))
+colnames(hyper_isl_betas_samplemeans) = c("N_Shore", "Island", "S_Shore", "N_Shore_SD", "Island_SD", "S_Shore_SD")
+
+```
+
+```{r fig.width=4, fig.asp=1.5}
+
+# draw
+library(beeswarm)
+atvector=c(1, 2, 3)
+beeswarm(list(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans[bluclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,0,255,80,maxColorValue=255),
+         col=rgb(0,0,255,80,maxColorValue=255),
+         add=F, cex=1.4, corral="random", outline=F, ylim=c(0,.55), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans[orgclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans[orgclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[orgclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,165,0,80,maxColorValue=255),
+         col=rgb(255,165,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F, ylim=c(0,.4), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans[redclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,0,0,80,maxColorValue=255),
+         col=rgb(255,0,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+beeswarm(list(hyper_isl_betas_samplemeans[grnclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans[grnclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[grnclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,255,0,80,maxColorValue=255),
+         col=rgb(0,255,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+beeswarm(list(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"],
+              hyper_isl_betas_samplemeans[norm_samps, "Island"], 
+              hyper_isl_betas_samplemeans[norm_samps, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(100,100,100,80,maxColorValue=255),
+         col=rgb(100,100,100,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),     
+                                  median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+         col=rgb(0,0,200,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[orgclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[orgclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[orgclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[orgclus_samples, "S_Shore"])),
+         col=rgb(255,165,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])),
+         col=rgb(200,0,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[grnclus_samples, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[grnclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[grnclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[grnclus_samples, "S_Shore"])),
+         col=rgb(0,200,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])),
+         col=rgb(100,100,100,maxColorValue=255), lwd=3)
+
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[orgclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[orgclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(255,165,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[orgclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[orgclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[orgclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(255,165,0,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[redclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[grnclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[grnclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,200,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[grnclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[grnclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[grnclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,200,0,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]), median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[norm_samps, "Island"]), median(hyper_isl_betas_samplemeans[norm_samps, "Island"])),
+             method="hyman", n=250), col=rgb(100,100,100,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[norm_samps, "Island"]), median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"]), median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])),
+             method="hyman", n=250), col=rgb(100,100,100,maxColorValue=255), lwd=3)
+
+
+
+
+# draw blue and red only
+atvector=c(1, 2, 3)
+beeswarm(list(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"], 
+              hyper_isl_betas_samplemeans[bluclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(0,0,255,80,maxColorValue=255),
+         col=rgb(0,0,255,80,maxColorValue=255),
+         add=F, cex=1.4, corral="random", outline=F, ylim=c(0,.55), xlim=c(0, 4))
+beeswarm(list(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"],
+              hyper_isl_betas_samplemeans[redclus_samples, "Island"], 
+              hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(255,0,0,80,maxColorValue=255),
+         col=rgb(255,0,0,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+beeswarm(list(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"],
+              hyper_isl_betas_samplemeans[norm_samps, "Island"], 
+              hyper_isl_betas_samplemeans[norm_samps, "S_Shore"]),
+         ylab="", xlab="", main="", method="swarm", pch=16, spacing=.7, at=atvector,
+         bg=rgb(100,100,100,80,maxColorValue=255),
+         col=rgb(100,100,100,80,maxColorValue=255),
+         add=T, cex=1.4, corral="random", outline=F)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),     
+                                  median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+         col=rgb(0,0,200,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),   
+                                  median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])),
+         col=rgb(200,0,0,maxColorValue=255), lwd=3)
+segments(x0=c(.6, 1.8, 2.8), y0=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),    
+                                  median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),      
+                                  median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])), 
+         x1=c(1.2, 2.2, 3.4), y1=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),
+                                   median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),
+                                   median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])),
+         col=rgb(100,100,100,maxColorValue=255), lwd=3)
+
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[bluclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(0,0,200,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]), median(hyper_isl_betas_samplemeans[redclus_samples, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[redclus_samples, "Island"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]), median(hyper_isl_betas_samplemeans[redclus_samples, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"]), median(hyper_isl_betas_samplemeans[redclus_samples, "S_Shore"])),
+             method="hyman", n=250), col=rgb(200,0,0,maxColorValue=255), lwd=3)
+
+lines(spline(x=c(1, 1.2, 1.8, 2), y=c(median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]), median(hyper_isl_betas_samplemeans[norm_samps, "N_Shore"]),
+                                      median(hyper_isl_betas_samplemeans[norm_samps, "Island"]), median(hyper_isl_betas_samplemeans[norm_samps, "Island"])),
+             method="hyman", n=250), col=rgb(100,100,100,maxColorValue=255), lwd=3)
+lines(spline(x=c(2, 2.2, 2.8, 3), y=c(median(hyper_isl_betas_samplemeans[norm_samps, "Island"]), median(hyper_isl_betas_samplemeans[norm_samps, "Island"]),
+                                      median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"]), median(hyper_isl_betas_samplemeans[norm_samps, "S_Shore"])),
+             method="hyman", n=250), col=rgb(100,100,100,maxColorValue=255), lwd=3)
+
+
+
+```
+
+```{r}
+
+# get list of islands island-methylated in RED, shore-methylated in RED, and island-and-shore-methylated in RED. Likewise in BLU and ORG
+
+####### for each hypermethylated island, calculate methylation diff between shore and island in two conditions
+calc_sho_isl_meth_diff = function(cond_samps, norm_samps, hyper_isl) {
+  isl_beta_diffs = t(sapply(hyper_isl, function(ii){
+    ii_betas = betas_splitisland[[ii]]
+    # north shore
+    n_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="N_Shore", ]))
+    samp_nshobeta = NA
+    if (length(n_sho_cpgs)>0) {
+      samp_nshobeta = mean(ii_betas[n_sho_cpgs, cond_samps]) - mean(ii_betas[n_sho_cpgs, norm_samps])
+    }
+    # south shore
+    s_sho_cpgs = unique(rownames(annotation_isl_sho_splitisland[[ii]][annotation_isl_sho_splitisland[[ii]]$Relation_to_Island=="S_Shore", ]))
+    samp_sshobeta = NA
+    if (length(s_sho_cpgs)>0) {
+      samp_sshobeta = mean(ii_betas[s_sho_cpgs, cond_samps]) - mean(ii_betas[s_sho_cpgs, norm_samps])
+    }
+    # island
+    isl_cpgs = unique(rownames(annotation_isl_isl_splitisland[[ii]]))
+    samp_islbeta = NA
+    if (length(isl_cpgs)>0) {
+      samp_islbeta = mean(ii_betas[isl_cpgs, cond_samps]) - mean(ii_betas[isl_cpgs, norm_samps])
+    }
+    c(samp_nshobeta, samp_islbeta, samp_sshobeta)
+  }))
+  sho_isl_diff = t(apply(isl_beta_diffs, 1, function(x){
+    c(mean(c(x[1], x[3]), na.rm = T), x[2], mean(c(x[1], x[3]), na.rm = T) - x[2])
+  }))
+  colnames(sho_isl_diff) = c("sho", "isl", "sho_isl_diff")
+  data.frame(sho_isl_diff)
+}
+
+
+# red clus
+hyper_islands_isl_sho_red = calc_sho_isl_meth_diff(cond_samps = redclus_samples, norm_samps = norm_samps, hyper_isl = red_hyper_isl) # 1755 islands
+sum(hyper_islands_isl_sho_red$isl>0 & hyper_islands_isl_sho_red$sho>0 & hyper_islands_isl_sho_red$sho_isl_diff < -.1) # 271 isl meth
+sum(hyper_islands_isl_sho_red$isl>0 & hyper_islands_isl_sho_red$sho>0 & hyper_islands_isl_sho_red$sho_isl_diff > .1) # 376 sho meth
+sum(hyper_islands_isl_sho_red$isl>0 & hyper_islands_isl_sho_red$sho>0 & -.1 <= hyper_islands_isl_sho_red$sho_isl_diff & hyper_islands_isl_sho_red$sho_isl_diff <= .1) # 939 sho meth
+
+# blu clus
+hyper_islands_isl_sho_blu = calc_sho_isl_meth_diff(cond_samps = bluclus_samples, norm_samps = norm_samps, hyper_isl = blu_hyper_isl) # 1381 islands
+sum(hyper_islands_isl_sho_blu$isl>0 & hyper_islands_isl_sho_blu$sho>0 & hyper_islands_isl_sho_blu$sho_isl_diff < -.1) # 458 isl meth
+sum(hyper_islands_isl_sho_blu$isl>0 & hyper_islands_isl_sho_blu$sho>0 & hyper_islands_isl_sho_blu$sho_isl_diff > .1) # 145 sho meth
+sum(hyper_islands_isl_sho_blu$isl>0 & hyper_islands_isl_sho_blu$sho>0 & -.1 <= hyper_islands_isl_sho_blu$sho_isl_diff & hyper_islands_isl_sho_blu$sho_isl_diff <= .1) # 689 sho meth
+
+
+```
+
+
+
+
+
+
+
+# Analyze methylation in encode chrom states
+
+```{r}
+
+# read encode
+chrom_states = read.table("E066.chromstates.islands.filtered.bedGraph", header=T, stringsAsFactors = F) # 166338 x 5
+length(unique(chrom_states$island_region)) # 78984. 78984/3=26328 islands
+length(unique(unlist(lapply(strsplit(unique(chrom_states$island_region), split="_"), function(x){x[1]})))) # 26328 islands
+chrom_states$island = unlist(lapply(strsplit(chrom_states$island_region, split="_"), function(x){x[1]}))
+encode_states = unique(chrom_states$state_liver)
+encode_states = encode_states[order(unlist(lapply(strsplit(encode_states, split="_"), function(x){as.numeric(x[1])})))]
+
+```
+
+```{r}
+# calculate the composition of states in each island
+chrom_states_splitisl = split(chrom_states, chrom_states$island) # 26328 islands
+isl_chrom_states = lapply(chrom_states_splitisl, function(isl){
+  shorerows = isl[grep("NSH$|SSH$", isl$island_region),]
+  shorelen = sum(apply(shorerows, 1, function(x){as.numeric(x[3]) - as.numeric(x[2])}))
+  islrows = isl[grep("ISL$", isl$island_region),]
+  isllen = sum(apply(islrows, 1, function(x){as.numeric(x[3]) - as.numeric(x[2])}))
+  islsho_comp = sapply(encode_states, function(st){
+    sum(apply(isl[isl$state_liver==st,], 1, function(x){as.numeric(x[3]) - as.numeric(x[2])})) / (shorelen + isllen)
+  })
+  isl_comp = sapply(encode_states, function(st){
+    sum(apply(islrows[islrows$state_liver==st,], 1, function(x){as.numeric(x[3]) - as.numeric(x[2])})) / isllen
+  })
+  sho_comp = sapply(encode_states, function(st){
+    sum(apply(shorerows[shorerows$state_liver==st,], 1, function(x){as.numeric(x[3]) - as.numeric(x[2])})) / shorelen
+  })
+  c(islsho_comp, isl_comp, sho_comp)
+})
+isl_chrom_states = do.call(rbind, isl_chrom_states) # 26328 islands x 45 states
+colnames(isl_chrom_states)[1:15] = paste0(colnames(isl_chrom_states)[1:15], "_IslSho")
+colnames(isl_chrom_states)[16:30] = paste0(colnames(isl_chrom_states)[16:30], "_Isl")
+colnames(isl_chrom_states)[31:45] = paste0(colnames(isl_chrom_states)[31:45], "_Sho")
+rm(chrom_states_splitisl)
+par(mar=c(10,3,3,3))
+barplot(apply(isl_chrom_states, 2, mean), col=c(rep("red", 15), rep("green", 15), rep("blue", 15)), names.arg = colnames(isl_chrom_states), cex.names=.8, las=2)
+
+```
+
+
+```{r}
+
+
+
+### get island/shore methylated in RED, and island/shore methylated in BLU
+RED_meth = rownames(hyper_islands_isl_sho_red) # RED hypermethylated in shore/island: 1755 
+RED_meth_isl = rownames(hyper_islands_isl_sho_red)[hyper_islands_isl_sho_red$isl>0 & hyper_islands_isl_sho_red$sho>0 & hyper_islands_isl_sho_red$sho_isl_diff < -.1] # 271 isl meth
+RED_meth_sho = rownames(hyper_islands_isl_sho_red)[hyper_islands_isl_sho_red$isl>0 & hyper_islands_isl_sho_red$sho>0 & hyper_islands_isl_sho_red$sho_isl_diff > .1] # 376 sho meth
+
+BLU_meth = rownames(hyper_islands_isl_sho_blu) # BLU hypermethylated in shore/island: 1381 
+BLU_meth_isl = rownames(hyper_islands_isl_sho_blu)[hyper_islands_isl_sho_blu$isl>0 & hyper_islands_isl_sho_blu$sho>0 & hyper_islands_isl_sho_blu$sho_isl_diff < -.1] # 458 isl meth
+BLU_meth_sho = rownames(hyper_islands_isl_sho_blu)[hyper_islands_isl_sho_blu$isl>0 & hyper_islands_isl_sho_blu$sho>0 & hyper_islands_isl_sho_blu$sho_isl_diff > .1] # 145 sho meth
+
+
+### look at chromatin states of shore-methylated in RED, vs island-methylated in Blu
+chromstates_RED_meth = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth, 1:15] # 1755 x 15
+chromstates_RED_meth_sho = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 1:15] # 376 x 15
+chromstates_RED_meth_sho_isl = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 16:30] # 376 x 15
+chromstates_RED_meth_sho_sho = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 31:45] # 376 x 15
+
+chromstates_BLU_meth = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth, 1:15] # 1381 x 15
+chromstates_BLU_meth_isl = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 1:15] # 458 x 15
+chromstates_BLU_meth_isl_isl = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 16:30] # 458 x 15
+chromstates_BLU_meth_isl_sho = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 31:45] # 458 x 15
+
+# plot
+barplot(cbind(apply(chromstates_BLU_meth_isl, 2, mean), 
+              apply(chromstates_RED_meth_sho, 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl),colnames(chromstates_RED_meth_sho)), cex.names=.8, las=2, col=c(rep("blue",15), rep("red",15)))
+
+barplot(cbind(apply(chromstates_BLU_meth_isl[,c(1,2,4,7,10,12,13)], 2, mean), 
+              apply(chromstates_RED_meth_sho[,c(1,2,4,7,10,12,13)], 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl)[c(1,2,4,7,10,12,13)],colnames(chromstates_RED_meth_sho)[c(1,2,4,7,10,12,13)]), cex.names=.8, las=2, col=c(rep("blue",7), rep("red",7)))
+
+
+barplot(cbind(apply(chromstates_BLU_meth_isl_isl, 2, mean), 
+              apply(chromstates_RED_meth_sho_isl, 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl_isl),colnames(chromstates_RED_meth_sho_isl)), cex.names=.8, las=2, col=c(rep("blue",15), rep("red",15)))
+
+barplot(cbind(apply(chromstates_BLU_meth_isl_isl[,c(1,2,4,7,10,12,13)], 2, mean), 
+              apply(chromstates_RED_meth_sho_isl[,c(1,2,4,7,10,12,13)], 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl_isl)[c(1,2,4,7,10,12,13)],colnames(chromstates_RED_meth_sho_isl)[c(1,2,4,7,10,12,13)]), cex.names=.8, las=2, col=c(rep("blue",7), rep("red",7)))
+
+
+```
+
+
+
+
+
+
+```{r}
+
+
+### using less strict criteria (don't need both isl & sho meth > 0)
+### get island/shore methylated in RED, and island/shore methylated in BLU
+RED_meth = rownames(hyper_islands_isl_sho_red) # RED hypermethylated in shore/island: 1755 
+RED_meth_isl = rownames(hyper_islands_isl_sho_red)[hyper_islands_isl_sho_red$sho_isl_diff < -.1] # 281 isl meth
+RED_meth_sho = rownames(hyper_islands_isl_sho_red)[hyper_islands_isl_sho_red$sho_isl_diff > .1] # 472 sho meth
+
+BLU_meth = rownames(hyper_islands_isl_sho_blu) # BLU hypermethylated in shore/island: 1381 
+BLU_meth_isl = rownames(hyper_islands_isl_sho_blu)[hyper_islands_isl_sho_blu$sho_isl_diff < -.1] # 481 isl meth
+BLU_meth_sho = rownames(hyper_islands_isl_sho_blu)[hyper_islands_isl_sho_blu$sho_isl_diff > .1] # 181 sho meth
+
+
+### look at chromatin states of shore-methylated in RED, vs island-methylated in Blu
+chromstates_RED_meth = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth, 1:15] 
+chromstates_RED_meth_sho = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 1:15] 
+chromstates_RED_meth_sho_isl = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 16:30] 
+chromstates_RED_meth_sho_sho = isl_chrom_states[rownames(isl_chrom_states) %in% RED_meth_sho, 31:45]
+
+chromstates_BLU_meth = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth, 1:15] 
+chromstates_BLU_meth_isl = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 1:15]
+chromstates_BLU_meth_isl_isl = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 16:30]
+chromstates_BLU_meth_isl_sho = isl_chrom_states[rownames(isl_chrom_states) %in% BLU_meth_isl, 31:45] 
+
+# plot
+barplot(cbind(apply(chromstates_BLU_meth_isl, 2, mean),
+              apply(chromstates_RED_meth_sho, 2, mean)), beside = T,
+        names.arg =c(colnames(chromstates_BLU_meth_isl),colnames(chromstates_RED_meth_sho)), cex.names=.8, las=2, col=c(rep("blue",15), rep("red",15)))
+
+barplot(cbind(apply(chromstates_BLU_meth_isl[,c(1,2,4,7,10,12,13)], 2, mean), 
+              apply(chromstates_RED_meth_sho[,c(1,2,4bbbv fbn7y b    hjujjjjjjjjjhhhh,7,10,12,13)], 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl)[c(1,2,4,7,10,12,13)],colnames(chromstates_RED_meth_sho)[c(1,2,4,7,10,12,13)]), cex.names=.8, las=2, col=c(rep("blue",7), rep("red",7)))
+
+
+barplot(cbind(apply(chromstates_BLU_meth_isl_isl, 2, mean),
+              apply(chromstates_RED_meth_sho_isl, 2, mean)), beside = T,
+        names.arg =c(colnames(chromstates_BLU_meth_isl_isl),colnames(chromstates_RED_meth_sho_isl)), cex.names=.8, las=2, col=c(rep("blue",15), rep("red",15)))
+
+barplot(cbind(apply(chromstates_BLU_meth_isl_isl[,c(1,2,4,7,10,12,13)], 2, mean), 
+              apply(chromstates_RED_meth_sho_isl[,c(1,2,4,7,10,12,13)], 2, mean)), beside = T, 
+        names.arg =c(colnames(chromstates_BLU_meth_isl_isl)[c(1,2,4,7,10,12,13)],colnames(chromstates_RED_meth_sho_isl)[c(1,2,4,7,10,12,13)]), cex.names=.8, las=2, col=c(rep("blue",7), rep("red",7)))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
