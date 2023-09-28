@@ -1,0 +1,427 @@
+---
+title: "CCA tissue enhancer analysis: Preliminary analysis"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+  
+
+```{r include=F}
+rm(list=ls())
+library(DiffBind, warn.conflicts=F, quietly=T)
+library(gplots)
+library(ggplot2)
+library(tidyr)
+source('analysis_cca_enhancers_functions.R')
+
+### just load recounted data
+# load(file="C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/Rdata_cca_k27ac_0_prelim_recount_promoters.Rdata")
+load(file="Rdata_cca_k27ac_0_prelim_recount_enhancers.Rdata")
+rm(K27ac_enhancers_dba) # non consensus sites
+
+K27ac_enhancers_dba_excLiver = dba(DBA=K27ac_enhancers_dba_all, mask=!K27ac_enhancers_dba_all$masks$Normal_liver) # 71 samples,   sites
+K27ac_enhancers_dba_excNorm = dba(DBA=K27ac_enhancers_dba_excLiver, mask=!K27ac_enhancers_dba_excLiver$masks$Normal) # 63 samples,   sites
+
+# load(file="C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/Rdata_cca_k27ac_0_prelim_recount_superenhancers.Rdata")
+```
+
+
+
+
+```{r include=FALSE}
+
+
+### read samples data
+samples_data = read.table("2019.08.05_samples_data.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+
+# infer iCluster membership if methylation clusters are 1 or 4
+samples_data$iCluster_infer = samples_data$`iCluster expanded`
+samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019`==4, "iCluster_infer"] = 4
+samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019`==1, "iCluster_infer"] = 1
+samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019` %in% c("2","3"), "iCluster_infer"] = "2/3"
+
+# infer AA based on country: set Italy, Japan, Thailand to No
+samples_data$AA_infer = samples_data$AA
+samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Italy", "AA_infer"] = "No"
+samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Japan", "AA_infer"] = "No"
+samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Thailand", "AA_infer"] = "No"
+
+
+##### get mutations for each sample
+muts_targetedgenes = read.table(file="genomic alterations/2019.03.07_mutations_targeted.txt", stringsAsFactors = F, header=T, sep="\t") # 5368 rows, 471 samples
+
+
+#### create samples info to plot tracks
+samples_info = dba.show(K27ac_enhancers_dba_all)[, c("ID", "Tissue", "Factor", "Condition")]
+colnames(samples_info)[1] = "Sample"
+colnames(samples_info)[3] = "Cluster"
+colnames(samples_info)[4] = "Fluke"
+samples_info$Sample = as.character(samples_info$Sample)
+samples_info$Tissue = as.character(samples_info$Tissue)
+samples_info$Cluster = as.character(samples_info$Cluster)
+samples_info$Fluke = as.character(samples_info$Fluke)
+
+samples_info[samples_info$Cluster=='0', 'Cluster'] = "N/A"
+samples_info[samples_info$Tissue=="Normal", "Cluster"] = "Normal"
+samples_info[samples_info$Tissue=="Normal_liver", "Cluster"] = "Normal_liver"
+samples_info[samples_info$Fluke=="N/A", "Fluke"] = "Fluke-Neg"
+
+samples_info$AA = samples_data[match(samples_info$Sample, samples_data$`Sample ID`), "AA"]
+samples_info[samples_info$Tissue=='Normal', "AA"] = "No"
+samples_info[samples_info$Tissue=='Normal_liver', "AA"] = "No"
+samples_info[grep("^Yes", samples_info$AA), "AA"] = "Yes"
+
+
+samples_info$HBV = samples_data[match(samples_info$Sample, samples_data$`Sample ID`), "HBV"]
+samples_info$HCV = samples_data[match(samples_info$Sample, samples_data$`Sample ID`), "HCV"]
+samples_info$Viral = "N/A"
+samples_info[is.na(samples_info$HBV), "HBV"] = "N/A"
+samples_info[is.na(samples_info$HCV), "HCV"] = "N/A"
+samples_info[samples_info$HBV=="Positive" & samples_info$HCV=="Positive", "Viral"] = "HBV+HCV"
+samples_info[samples_info$HBV=="Positive" & samples_info$HCV=="Negative", "Viral"] = "HBV"
+samples_info[samples_info$HBV=="Positive" & samples_info$HCV=="N/A", "Viral"] = "HBV"
+samples_info[samples_info$HBV=="Negative" & samples_info$HCV=="Positive", "Viral"] = "HCV"
+samples_info[samples_info$HBV=="N/A" & samples_info$HCV=="Positive", "Viral"] = "HCV"
+samples_info[samples_info$HBV=="Negative" & samples_info$HCV=="Negative", "Viral"] = "Negative"
+samples_info = samples_info[, !(colnames(samples_info) %in% c("HBV", "HCV"))]
+
+
+samples_info$Location = samples_data[match(samples_info$Sample, samples_data$`Sample ID`), "Anatomical subtype"]
+samples_info[samples_info$Tissue=="Normal_liver", "Location"] = "Liver"
+
+rm(samples_data)
+```
+
+
+
+
+
+
+
+
+
+## Spearman, default score=DBA_SCORE_TMM_MINUS_FULL?
+
+```{r fig.width=12, fig.asp=.8}
+# Spearman, default score=DBA_SCORE_TMM_MINUS_FULL?
+heatmap_mat = dba.plotHeatmap(K27ac_enhancers_dba_excLiver, distMethod="spearman", correlations=FALSE, maxSites=2000, hclustfun = function(x) hclust(x, method="ward.D2"))
+samples_info
+
+```
+
+```{r fig.width=12, fig.asp=.8}
+# exclude normal
+# Spearman, default  score=DBA_SCORE_TMM_MINUS_FULL?
+heatmap_mat = dba.plotHeatmap(K27ac_enhancers_dba_excNorm, distMethod="spearman", correlations=FALSE, maxSites=2000, hclustfun = function(x) hclust(x, method="ward.D2"))
+
+heatmap_colnames = colnames(mcols(heatmap_mat))
+heatmap_colnames = sub("^X", "", heatmap_colnames)
+zz_plot = samples_info[match(heatmap_colnames, samples_info$Sample),c("Sample", "Cluster", "Fluke", "AA", "Viral", "Location")]
+zz_plot$ColID = 1:nrow(zz_plot)
+zz_plot = pivot_longer(zz_plot, cols=Cluster | Fluke | AA | Viral | Location)
+zz_plot$RowID = rep(c(5,4,3,2,1), nrow(zz_plot)/5)
+zz_plot$'name-value' = paste0(zz_plot$name, ":", zz_plot$value)
+zz_plot$color = "yellow"
+zz_plot[zz_plot$`name-value`=="Cluster:Normal", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Cluster:Normal_liver", 'color'] = 'brown'
+zz_plot[zz_plot$`name-value`=="Cluster:1", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Cluster:2", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Cluster:3", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Cluster:4", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Cluster:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Neg", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Pos", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:No", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="AA:Yes", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Viral:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value` %in% c("Viral:HBV", "Viral:HCV", "Viral:HBV+HCV"), 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Viral:Negative", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Location:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Location:Intrahepatic", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Location:Perihilar", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Location:Distal", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Location:Extrahepatic", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Location:Cystic duct", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Location:Liver", 'color'] = 'white'
+
+
+ggplot(data=zz_plot, mapping = aes(x=ColID, y=RowID)) +
+  geom_tile(aes(width = 1,height = 1 , fill = color)) +
+  scale_fill_manual(breaks=c("black","blue","green", "grey", "orange", "red", "white"), values = c("black","blue","green", "grey", "orange", "red", "white")) +
+  theme_void()
+
+```
+
+
+
+
+
+  
+```{r}
+# Save the enhancer groups
+group_Fluke = heatmap_colnames[29:length(heatmap_colnames)]
+group_C4 = heatmap_colnames[14:28]
+group_Mix = heatmap_colnames[1:13]
+
+samples_info$EGroup = "N/A"
+samples_info[samples_info$Sample %in% group_Fluke, "EGroup"] = "Fluke"
+samples_info[samples_info$Sample %in% group_C4, "EGroup"] = "C4"
+samples_info[samples_info$Sample %in% group_Mix, "EGroup"] = "Mixed"
+samples_info[samples_info$Tissue=='Normal', "EGroup"] = "Normal"
+samples_info[samples_info$Tissue=='Normal_liver', "EGroup"] = "Normal_liver"
+write.table(samples_info, file="2021.12.30 samples_info.txt", sep='\t', row.names=FALSE, quote=FALSE)
+```
+
+
+```{r fig.width=12, fig.asp=.8}
+# plot again for paper
+# exclude normal
+# Spearman, default  score=DBA_SCORE_TMM_MINUS_FULL?
+heatmap_mat = dba.plotHeatmap(K27ac_enhancers_dba_excNorm, distMethod="spearman", dendrogram='column', correlations=FALSE, maxSites=2000, hclustfun = function(x) hclust(x, method="ward.D2"))
+
+heatmap_colnames = colnames(mcols(heatmap_mat))
+heatmap_colnames = sub("^X", "", heatmap_colnames)
+zz_plot = samples_info[match(heatmap_colnames, samples_info$Sample),c("Sample", "Cluster", "Fluke", "AA", "Viral", "Location")]
+zz_plot$ColID = 1:nrow(zz_plot)
+zz_plot = pivot_longer(zz_plot, cols=Cluster | Fluke | AA | Viral | Location)
+zz_plot$RowID = rep(c(5,4,3,2,1), nrow(zz_plot)/5)
+zz_plot$'name-value' = paste0(zz_plot$name, ":", zz_plot$value)
+zz_plot$color = "yellow"
+zz_plot[zz_plot$`name-value`=="Cluster:Normal", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Cluster:Normal_liver", 'color'] = 'brown'
+zz_plot[zz_plot$`name-value`=="Cluster:1", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Cluster:2", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Cluster:3", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Cluster:4", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Cluster:N/A", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Neg", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Pos", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:No", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="AA:Yes", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:N/A", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Viral:N/A", 'color'] = 'white'
+zz_plot[zz_plot$`name-value` %in% c("Viral:HBV", "Viral:HCV", "Viral:HBV+HCV"), 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Viral:Negative", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Location:N/A", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Location:Intrahepatic", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Location:Perihilar", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Location:Distal", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Location:Extrahepatic", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Location:Cystic duct", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Location:Liver", 'color'] = 'brown'
+
+ggplot(data=zz_plot, mapping = aes(x=ColID, y=RowID)) +
+  geom_tile(aes(width = 1,height = 1 , fill = color)) +
+  scale_fill_manual(breaks=c("black","blue","green", "grey", "orange", "red", "white"), values = c("black","blue","green3", "grey", "orange", "red2", "white")) +
+  theme_void()
+
+# plot track for EGroup
+zz_plot = samples_info[match(heatmap_colnames, samples_info$Sample),c("Sample", "EGroup")]
+zz_plot$color = "yellow"
+zz_plot[zz_plot$EGroup=="Fluke", "color"] = 'blue'
+zz_plot[zz_plot$EGroup=="C4", "color"] = 'red'
+zz_plot[zz_plot$EGroup=="Mixed", "color"] = 'green'
+ggplot(data=zz_plot, mapping = aes(x=1:nrow(zz_plot), y=rep(1, nrow(zz_plot)))) +
+  geom_tile(aes(width = 1,height = 1 , fill = color)) +
+  scale_fill_manual(breaks=c("black","blue","green", "grey", "orange", "red", "white"), values = c("black","blue","green3", "grey", "orange", "red2", "white")) +
+  theme_void()
+```
+
+
+
+### consensus clustering
+
+
+
+
+##### featsel: 2000 top SD. consensus sampling: .9 .9. clustering: ward.D2 ward.D2
+```{r}
+
+#### extract data
+K27ac_enhancers_signals = dba.peakset(K27ac_enhancers_dba_excNorm, bRetrieve = T, DataType = DBA_DATA_FRAME)
+K27ac_enhancers_signals = K27ac_enhancers_signals[, 4:ncol(K27ac_enhancers_signals)]
+# casting to dataframe may change some of the sample names, so rename them. First check that sample ordering is as expected
+colnames(K27ac_enhancers_signals) = sub("^X", "", colnames(K27ac_enhancers_signals))
+K27ac_enhancers_signals = as.matrix(K27ac_enhancers_signals)
+K27ac_enhancers_signals = log2(K27ac_enhancers_signals)
+row_sd = rowSds(K27ac_enhancers_signals)
+K27ac_enhancers_signals = K27ac_enhancers_signals[order(row_sd, decreasing = T)[1:2000], ]
+
+```
+
+```{r fig.width=12, fig.asp=.8}
+
+library(ConsensusClusterPlus)
+
+conclus_results = ConsensusClusterPlus(K27ac_enhancers_signals, maxK=10, reps=1000, pItem=0.9, pFeature=.9, clusterAlg="hc", distance="spearman", innerLinkage="ward.D2", finalLinkage = 'ward.D2', seed=123)
+
+
+# sort consensus matrix by enhancer groups
+for (ii in 2:10) {
+  consensusMatrix = conclus_results[[ii]]$consensusMatrix
+  rownames(consensusMatrix) = colnames(K27ac_enhancers_signals)
+  colnames(consensusMatrix) = colnames(K27ac_enhancers_signals)
+  consensusMatrix_sorted = consensusMatrix[c(group_Mix, group_C4, group_Fluke), c(group_Mix, group_C4, group_Fluke)]
+  
+  my_palette <- colorRampPalette(c("white", "blue"))(n = 299)
+  col_breaks = c(seq(0,2,length=100),
+    seq(2.01,4,length=100),
+    seq(4.01,6,length=100))
+  heatmap.2(consensusMatrix_sorted, Rowv = F, Colv = F,  trace="none", scale='none', col=my_palette)
+}
+```
+
+
+
+```{r}
+### plot again to get thicker lines
+conclus_results = ConsensusClusterPlus(K27ac_enhancers_signals, maxK=10, reps=1000, pItem=0.9, pFeature=.9, clusterAlg="hc", distance="spearman", innerLinkage="ward.D2", finalLinkage = 'ward.D2', seed=123)
+
+```
+
+
+```{r}
+icl = calcICL(conclus_results)
+
+```
+
+```{r}
+# get average consensus within enhancer groups
+
+ii = 7
+consensusMatrix = conclus_results[[7]]$consensusMatrix
+rownames(consensusMatrix) = colnames(K27ac_enhancers_signals)
+colnames(consensusMatrix) = colnames(K27ac_enhancers_signals)
+consensusMatrix_sorted = consensusMatrix[c(group_Mix, group_C4, group_Fluke), c(group_Mix, group_C4, group_Fluke)]
+for (ii in 1:nrow(consensusMatrix_sorted)) {
+  consensusMatrix_sorted[ii,ii] = 0
+}
+
+consensus_Mix = c()
+for (ii in 1:nrow(consensusMatrix_sorted)) {
+  consensus_Mix[ii] = sum(consensusMatrix_sorted[ii,][1:length(group_Mix)]) / sum(consensusMatrix_sorted[ii,])
+}
+mix_samp_consensus = consensus_Mix[1:length(group_Mix)]
+print("Mixed samples consensus with Mixed:")
+print(mix_samp_consensus)
+print(paste0("Avg: ", mean(mix_samp_consensus)))
+
+consensus_C4 = c()
+for (ii in 1:nrow(consensusMatrix_sorted)) {
+  consensus_C4[ii] = sum(consensusMatrix_sorted[ii,][(length(group_Mix)+1):(length(group_Mix)+length(group_C4))]) / sum(consensusMatrix_sorted[ii,])
+}
+C4_samp_consensus = consensus_C4[(length(group_Mix)+1):(length(group_Mix)+length(group_C4))]
+print("C4 samples consensus with C4:")
+print(C4_samp_consensus)
+print(paste0("Avg: ", mean(C4_samp_consensus)))
+
+
+consensus_Fluke = c()
+for (ii in 1:nrow(consensusMatrix_sorted)) {
+  consensus_Fluke[ii] = sum(consensusMatrix_sorted[ii,][(length(group_Mix)+length(group_C4)+1):ncol(consensusMatrix_sorted)]) / sum(consensusMatrix_sorted[ii,])
+}
+Fluke_samp_consensus = consensus_Fluke[(length(group_Mix)+length(group_C4)+1):ncol(consensusMatrix_sorted)]
+print("Fluke samples consensus with Fluke:")
+print(Fluke_samp_consensus)
+print(paste0("Avg: ", mean(Fluke_samp_consensus)))
+
+print(paste0("overall avg consensus: ", mean(c(mix_samp_consensus, C4_samp_consensus, Fluke_samp_consensus))))
+```
+
+
+
+
+#### plot pca
+```{r fig.width=10, fig.asp=.5}
+
+# get colors for plotting
+zz_plot = samples_info[match(dba.show(K27ac_enhancers_dba_excLiver)$ID, samples_info$Sample),c("Sample", "Cluster", "Fluke", "AA", "Viral", "Location", "EGroup")]
+zz_plot$group_color = "black"
+zz_plot[zz_plot$EGroup=="Fluke", "group_color"] = "blue"
+zz_plot[zz_plot$EGroup=="C4", "group_color"] = "red2"
+zz_plot[zz_plot$EGroup=="Mixed", "group_color"] = "green3"
+zz_plot[zz_plot$EGroup=="Normal", "group_color"] = "black"
+zz_plot[zz_plot$EGroup=="Normal_liver", "group_color"] = "brown"
+
+# get indices for CCA clusters
+clus1_idx = which(zz_plot$Cluster=='1')
+clus2_idx = which(zz_plot$Cluster=='2')
+clus3_idx = which(zz_plot$Cluster=='3')
+clus4_idx = which(zz_plot$Cluster=='4')
+
+# get indices for clinical features
+aa_idx = which(zz_plot$AA=='Yes')
+fluke_idx = which(zz_plot$Fluke=='Fluke-Pos')
+viral_idx = which(zz_plot$Viral %in% c('HBV', 'HCV', 'HBV+HCV'))
+intra_idx = which(zz_plot$Location=='Intrahepatic')
+peri_idx = which(zz_plot$Location=='Perihilar')
+distal_idx = which(zz_plot$Location=='Distal')
+extra_idx = which(zz_plot$Location=='Extrahepatic')
+cystic_idx = which(zz_plot$Location=='Cystic duct')
+liver_idx = which(zz_plot$Location=='Liver')
+
+
+
+
+##################### pca: log & rank transform
+K27ac_enhancers_signals = dba.peakset(K27ac_enhancers_dba_excLiver, bRetrieve = T, DataType = DBA_DATA_FRAME) 
+K27ac_enhancers_signals = K27ac_enhancers_signals[, 4:ncol(K27ac_enhancers_signals)]
+colnames(K27ac_enhancers_signals) = sub("^X", "", colnames(K27ac_enhancers_signals))
+K27ac_enhancers_signals = log2(K27ac_enhancers_signals)
+K27ac_enhancers_signals = apply(K27ac_enhancers_signals, 2, function(x){rank(x, ties.method = "average")})
+K27ac_enhancers_signals = prcomp(t(K27ac_enhancers_signals), center=T, scale=T)
+
+# plot pca, colored by enhancer group
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,2], col=zz_plot$group_color, pch=16)
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,3], col=zz_plot$group_color, pch=16)
+
+# plot pca with CCA clusters
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,2], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[clus1_idx,1], y=K27ac_enhancers_signals$x[clus1_idx,2], pch=1, cex=2.5, col="blue")
+points(x=K27ac_enhancers_signals$x[clus2_idx,1], y=K27ac_enhancers_signals$x[clus2_idx,2], pch=1, cex=2.5, col="orange")
+points(x=K27ac_enhancers_signals$x[clus3_idx,1], y=K27ac_enhancers_signals$x[clus3_idx,2], pch=1, cex=2.5, col="green3")
+points(x=K27ac_enhancers_signals$x[clus4_idx,1], y=K27ac_enhancers_signals$x[clus4_idx,2], pch=1, cex=2.5, col="red2")
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,3], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[clus1_idx,1], y=K27ac_enhancers_signals$x[clus1_idx,3], pch=1, cex=2.5, col="blue")
+points(x=K27ac_enhancers_signals$x[clus2_idx,1], y=K27ac_enhancers_signals$x[clus2_idx,3], pch=1, cex=2.5, col="orange")
+points(x=K27ac_enhancers_signals$x[clus3_idx,1], y=K27ac_enhancers_signals$x[clus3_idx,3], pch=1, cex=2.5, col="green3")
+points(x=K27ac_enhancers_signals$x[clus4_idx,1], y=K27ac_enhancers_signals$x[clus4_idx,3], pch=1, cex=2.5, col="red2")
+
+# plot pca with risk factors
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,2], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[aa_idx,1], y=K27ac_enhancers_signals$x[aa_idx,2], pch=2, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_signals$x[fluke_idx,1], y=K27ac_enhancers_signals$x[fluke_idx,2], pch=1, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_signals$x[viral_idx,1], y=K27ac_enhancers_signals$x[viral_idx,2], pch="V", cex=1, col="gray30")
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,3], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[aa_idx,1], y=K27ac_enhancers_signals$x[aa_idx,3], pch=2, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_signals$x[fluke_idx,1], y=K27ac_enhancers_signals$x[fluke_idx,3], pch=1, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_signals$x[viral_idx,1], y=K27ac_enhancers_signals$x[viral_idx,3], pch="V", cex=1, col="gray30")
+
+# plot pca with subtype
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,2], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[peri_idx,1], y=K27ac_enhancers_signals$x[peri_idx,2], pch="p", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[distal_idx,1], y=K27ac_enhancers_signals$x[distal_idx,2], pch="d", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[extra_idx,1], y=K27ac_enhancers_signals$x[extra_idx,2], pch="e", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[cystic_idx,1], y=K27ac_enhancers_signals$x[cystic_idx,2], pch="c", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[liver_idx,1], y=K27ac_enhancers_signals$x[liver_idx,2], pch="L", cex=1.1, col="gray30")
+plot(x=K27ac_enhancers_signals$x[,1], y=K27ac_enhancers_signals$x[,3], col=zz_plot$group_color, pch=16)
+points(x=K27ac_enhancers_signals$x[peri_idx,1], y=K27ac_enhancers_signals$x[peri_idx,3], pch="p", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[distal_idx,1], y=K27ac_enhancers_signals$x[distal_idx,3], pch="d", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[extra_idx,1], y=K27ac_enhancers_signals$x[extra_idx,3], pch="e", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[cystic_idx,1], y=K27ac_enhancers_signals$x[cystic_idx,3], pch="c", cex=1.1, col="gray30")
+points(x=K27ac_enhancers_signals$x[liver_idx,1], y=K27ac_enhancers_signals$x[liver_idx,3], pch="L", cex=1.1, col="gray30")
+
+```
+
+
+
