@@ -1,0 +1,576 @@
+---
+title: "CCA tissue enhancer analysis: Cell lines"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+  
+# Tissue enhancers
+
+  
+  
+
+```{r include=F}
+
+# options(scipen=0)
+rm(list=ls())
+library(DiffBind, warn.conflicts=F, quietly=T)
+library(beeswarm)
+library(msigdbr)
+library(fgsea)
+library(gplots)
+library(clusterProfiler)
+library(biomaRt)
+library(DESeq2)
+library(tidyr)
+library(ggplot2)
+source('analysis_cca_enhancers_functions.R')
+
+
+# read tissue enhancer data
+load(file="Rdata_cca_k27ac_0_prelim_final.Rdata")
+rm(K27ac_enhsup_dba, K27ac_origPeaks, superenhancers)
+
+
+# read diffbind results
+# load(file="Rdata_cca_k27ac_3c_cells_diffbind.Rdata")
+# rm(K27ac_cells_dba, K27ac_cells_enhsup_tisspeaks_dba)
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts1.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts2.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts4.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts5.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts1_diffexpr.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts2_diffexpr.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3_diffexpr.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts4_diffexpr.Rdata")
+# load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts5_diffexpr.Rdata")
+
+
+#  load multicomp results
+load("Rdata_cca_k27ac_3d.2_cells_valenh_new.Rdata")
+
+
+# read mapping
+target_map = read.table("target_gene_mapping/20190628_enhancer_target_map_noTAD_CPLW_rho.3_liberal.txt", header=T, stringsAsFactors = F) 
+target_map = target_map[!is.na(target_map$gene),c("enhancer", "gene")]
+target_map = target_map[!duplicated(target_map),]
+
+
+
+
+# read mSigDB genesets
+msigdb_H = msigdbr(species = "Homo sapiens", category = "H") # 50 genesets
+msigdb_H_list = msigdb_H %>% split(x = .$gene_symbol, f = .$gs_name)
+msigdb_H_term2gene = data.frame(TERM=msigdb_H$gs_name, GENE=msigdb_H$gene_symbol, stringsAsFactors = F)
+msigdb_H_term2gene = rbind(msigdb_H_term2gene, data.frame(TERM="ALL_GENES", GENE=unique(na.omit(target_map$gene)), stringsAsFactors = F)) # clusterProfiler considers universe = genes in genesets
+
+
+# read biomart gene descriptions
+biomart_ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+
+
+get_genesets = function(gene, pathways=c("H","R")) {
+  ann = NULL
+  if ("H" %in% pathways) {
+    ann = c(ann, msigdb_H_term2gene[msigdb_H_term2gene$GENE==gene,"TERM"])
+  }
+  if ("R" %in% pathways) {
+    ann = c(ann, msigdb_R_term2gene[msigdb_R_term2gene$GENE==gene,"TERM"])
+  }
+  ann = unique(ann)
+  ann = ann[ann!="ALL_GENES"]
+  ann = gsub("HALLMARK", "H", ann)
+  ann = gsub("REACTOME", "R", ann)
+  ann = sapply(ann, function(x){substr(x, 1, 30)})
+  paste0(ann, collapse=",")
+}
+get_gene_descr = function(gene){
+  descr = getBM(attributes=c('description'), filters='external_gene_name', values=gene, mart=biomart_ensembl)[1,1]
+  if (is.na(descr)) { "" 
+  } else {  strsplit(descr, split=" [", fixed=T)[[1]][1] }
+}
+
+
+
+samples_data = read.table("2021.08.22 samples_info.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+```
+
+
+
+
+### plot tissue enhancers
+
+```{r fig.width=12}
+
+load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3.Rdata")
+load(file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3_diffexpr.Rdata")
+
+
+####### get deseq2 normalization factors (exclude liver samples)
+# # get the factors based on the diffbind-default-normalization matrix
+# # note: Supposed to use raw counts! but somehow this gives nice heatmap?!
+# deseq2facs = get_deseq2_normfacs(K27ac_dba, samps=K27ac_dba$samples[K27ac_dba$samples$Tissue != 'Normal_liver',"SampleID"])
+
+# get factors based on raw counts, BUT SET NEGATIVES TO 0 FIRST!
+zz_K27ac_dba = dba.count(K27ac_dba, peaks=NULL, score=DBA_SCORE_READS_MINUS)
+zz_K27ac_data = zz_K27ac_dba$binding[, -1:-3]
+zz_K27ac_data = zz_K27ac_data[, colnames(zz_K27ac_data) %in% samples_data[samples_data$EGroup!="Normal_liver","Sample"]]
+zz_K27ac_data[zz_K27ac_data < 0] = 0
+deseq2facs = estimateSizeFactorsForMatrix(zz_K27ac_data)
+rm(zz_K27ac_dba, zz_K27ac_data)
+
+geneset_genes = unique(c(msigdb_H_list$HALLMARK_INTERFERON_GAMMA_RESPONSE, msigdb_H_list$HALLMARK_ALLOGRAFT_REJECTION, msigdb_H_list$HALLMARK_INTERFERON_ALPHA_RESPONSE, msigdb_H_list$HALLMARK_COMPLEMENT, msigdb_H_list$HALLMARK_IL2_STAT5_SIGNALING, msigdb_H_list$HALLMARK_IL6_JAK_STAT3_SIGNALING, msigdb_H_list$HALLMARK_INFLAMMATORY_RESPONSE))
+
+# geneset_genes2 = msigdb_H_list$HALLMARK_ESTROGEN_RESPONSE_EARLY
+
+
+
+####### get enhancers & genes gained in C4 vs Fluke & Mixed
+zz_mix_fluke = val_enhancers_multicomp$Tumor_EGroupMixed_vs_Tumor_EGroupFluke$gain_exp_enhgain[, c("gene", "enhancer", "Fold.x.1", "p.value.x.1", "Fold.x.2", "p.value.x.2", "Fold.y.1", "p.value.y.1", "expr_fold.x.1", "expr_p.x.1", "expr_fold.x.2", "expr_p.x.2")]
+
+zz_mix_C4 = val_enhancers_multicomp$Tumor_EGroupMixed_vs_Tumor_EGroupC4$gain_exp_enhgain[, c("gene", "enhancer", "Fold.x.1", "p.value.x.1", "Fold.x.2", "p.value.x.2", "Fold.y.1", "p.value.y.1", "expr_fold.x.1", "expr_p.x.1", "expr_fold.x.2", "expr_p.x.2")]
+
+mix_gain = merge(zz_mix_fluke, zz_mix_C4, by=c('enhancer','gene'), suffixes=c('.Fluke', '.C4'), sort=F)
+
+# for each gene, select one enhancer
+mix_gain_split = split(mix_gain, mix_gain$gene)
+set.seed(123)
+zz = lapply(mix_gain_split, function(x){return (x[sample(1:nrow(x), size=1), ])}) # select random enhancer 
+mix_gain = do.call(rbind, zz)
+set.seed(777)
+mix_gain = mix_gain[sample(nrow(mix_gain)),] # randomize order because val_enhancers_multicomp puts genes with no cell-line expression at bottom
+mix_gain$enhancergene = paste0(mix_gain$enhancer, '|', mix_gain$gene)
+mix_enhancergene = mix_gain[, c("enhancergene", "enhancer", "gene")]
+
+
+
+######### get enhancers & genes NOT GAINED in mix vs normal, mix vs fluke, mix vs C4 (enhancer & expression)
+
+### mix vs normal
+contrast = 1
+# get diffbind results for all enhancer
+my_report = data.frame(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=1, bCounts = T, bNormalized = T), check.names = F)
+colnames(my_report)[6:ncol(my_report)] = colnames(mcols(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=0.05, bCounts = T, bNormalized = T)))
+my_report = my_report[!is.na(my_report$`p-value`) & !is.na(my_report$Fold),]
+my_report$enhancer = paste0(my_report$seqnames, ":", my_report$start, "-", my_report$end)
+# merge with gene expression
+my_report = merge(my_report, target_map, by="enhancer", sort=F)
+diffexpr = diffexpr_list_contrasts3[[contrast]]$diffexpr
+diffexpr = data.frame(gene=rownames(diffexpr), expr_fold=diffexpr$log2FoldChange, expr_p=diffexpr$pvalue, stringsAsFactors = F)
+diffexpr = diffexpr[!is.na(diffexpr$expr_fold) & !is.na(diffexpr$expr_p),]
+my_report = merge(my_report, diffexpr, by="gene", sort=F)
+my_report$enhancergene = paste0(my_report$enhancer, "|", my_report$gene)
+# get nogain ehhancers
+mix_norm_nogain = my_report[my_report$`p-value` > .3 & my_report$expr_p > .3,]
+
+### mix vs Fluke
+contrast = 3
+# get diffbind results for all enhancer
+my_report = data.frame(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=1, bCounts = T, bNormalized = T), check.names = F)
+colnames(my_report)[6:ncol(my_report)] = colnames(mcols(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=0.05, bCounts = T, bNormalized = T)))
+my_report = my_report[!is.na(my_report$`p-value`) & !is.na(my_report$Fold),]
+my_report$enhancer = paste0(my_report$seqnames, ":", my_report$start, "-", my_report$end)
+# merge with gene expression
+my_report = merge(my_report, target_map, by="enhancer", sort=F)
+diffexpr = diffexpr_list_contrasts3[[contrast]]$diffexpr
+diffexpr = data.frame(gene=rownames(diffexpr), expr_fold=diffexpr$log2FoldChange, expr_p=diffexpr$pvalue, stringsAsFactors = F)
+diffexpr = diffexpr[!is.na(diffexpr$expr_fold) & !is.na(diffexpr$expr_p),]
+my_report = merge(my_report, diffexpr, by="gene", sort=F)
+my_report$enhancergene = paste0(my_report$enhancer, "|", my_report$gene)
+# get nogain ehhancers
+mix_fluke_nogain = my_report[my_report$`p-value` > .3 & my_report$expr_p > .3,]
+
+### mix vs c4
+contrast = 4
+# get diffbind results for all enhancer
+my_report = data.frame(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=1, bCounts = T, bNormalized = T), check.names = F)
+colnames(my_report)[6:ncol(my_report)] = colnames(mcols(dba.report(K27ac_dba_deseq_contrasts3, contrast=contrast, method=DBA_DESEQ2, th=0.05, bCounts = T, bNormalized = T)))
+my_report = my_report[!is.na(my_report$`p-value`) & !is.na(my_report$Fold),]
+my_report$enhancer = paste0(my_report$seqnames, ":", my_report$start, "-", my_report$end)
+# merge with gene expression
+my_report = merge(my_report, target_map, by="enhancer", sort=F)
+diffexpr = diffexpr_list_contrasts3[[contrast]]$diffexpr
+diffexpr = data.frame(gene=rownames(diffexpr), expr_fold=diffexpr$log2FoldChange, expr_p=diffexpr$pvalue, stringsAsFactors = F)
+diffexpr = diffexpr[!is.na(diffexpr$expr_fold) & !is.na(diffexpr$expr_p),]
+my_report = merge(my_report, diffexpr, by="gene", sort=F)
+my_report$enhancergene = paste0(my_report$enhancer, "|", my_report$gene)
+# get nogain ehhancers
+mix_C4_nogain = my_report[my_report$`p-value` > .3 & my_report$expr_p > .3,]
+
+mix_nogain_enhancergene = intersect(intersect(mix_norm_nogain$enhancergene, mix_fluke_nogain$enhancergene), mix_C4_nogain$enhancergene)
+mix_nogain_enhancergene = data.frame(enhancergene=mix_nogain_enhancergene, stringsAsFactors = F)
+mix_nogain_enhancergene = cbind(mix_nogain_enhancergene, do.call(rbind, strsplit(mix_nogain_enhancergene$enhancergene, '|', fixed=T)), stringsAsFactors=F)
+colnames(mix_nogain_enhancergene)[2:3] = c("enhancer", "gene")
+mix_nogain_enhancergene = mix_nogain_enhancergene[!duplicated(mix_nogain_enhancergene$enhancer),] # remove duplicate enhancers
+
+# for each gene, select one enhancer
+mix_nogain_enhancergene_split = split(mix_nogain_enhancergene, mix_nogain_enhancergene$gene)
+set.seed(123)
+zz = lapply(mix_nogain_enhancergene_split, function(x){return (x[sample(1:nrow(x), size=1), ])}) # select random enhancer 
+mix_nogain_enhancergene = do.call(rbind, zz)
+# select 30 to plot
+set.seed(999)
+mix_nogain_enhancergene = mix_nogain_enhancergene[sample(1:nrow(mix_nogain_enhancergene), size=30),]
+
+
+###### order the data to plot
+plot_samples = samples_data[samples_data$EGroup!="Normal_liver",]
+plot_samples = plot_samples[order(factor(plot_samples$EGroup, levels=c("Fluke", "C4", "Mixed", "Normal"))),]
+plot_enhancers = rbind(mix_enhancergene, mix_nogain_enhancergene)
+plot_enhancers$gain = F
+plot_enhancers[plot_enhancers$enhancergene %in% mix_enhancergene$enhancergene, "gain"] = T
+plot_enhancers$geneset_gene = F
+plot_enhancers[plot_enhancers$gene %in% geneset_genes, "geneset_gene"] = T
+
+
+
+###### get K27ac plotting data 
+K27ac_dba = dba.count(K27ac_dba, peaks=NULL, score=DBA_SCORE_READS_MINUS)
+K27ac_enhancers = paste0(K27ac_dba$peaks[[1]]$Chr, ":", K27ac_dba$peaks[[1]]$Start, "-", K27ac_dba$peaks[[1]]$End)
+
+
+
+################ do deseq normalization using NON-ADJUSTED DESEQ
+K27ac_plotdata = K27ac_dba$binding[, -1:-3]
+K27ac_plotdata = K27ac_plotdata[match(plot_enhancers$enhancer, K27ac_enhancers), match(plot_samples$Sample, colnames(K27ac_plotdata))]
+K27ac_plotdata[K27ac_plotdata < 0] = 0
+deseq2facs = deseq2facs[match(colnames(K27ac_plotdata), names(deseq2facs))]
+K27ac_plotdata = t(t(K27ac_plotdata) / deseq2facs)
+K27ac_plotdata = 1 + K27ac_plotdata
+K27ac_plotdata = log2(K27ac_plotdata)
+
+
+
+######## plot K27ac heatmap
+plot_samples$color = "yellow"
+plot_samples[plot_samples$EGroup=='Fluke', 'color'] = 'blue'
+plot_samples[plot_samples$EGroup=='C4', 'color'] = 'red2'
+plot_samples[plot_samples$EGroup=='Mixed', 'color'] = 'green3'
+plot_samples[plot_samples$EGroup=='Normal', 'color'] = 'black'
+plot_enhancers$color = 'white'
+plot_enhancers[plot_enhancers$geneset_gene, 'color'] = 'black'
+my_palette <- colorRampPalette(c("white", "darkgreen"))(n = 299)
+col_breaks = c(seq(0,2,length=100),
+  seq(2.01,4,length=100),
+  seq(4.01,6,length=100))
+heatmap_mat = heatmap.2(K27ac_plotdata, Colv = FALSE, Rowv = FALSE, dendrogram='none', density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                        trace="none", scale='none', col=my_palette, breaks=col_breaks, ColSideColors=plot_samples$color, RowSideColors=plot_enhancers$color)
+
+
+
+# plot tracks
+heatmap_colnames = rownames(heatmap_mat$carpet)
+zz_plot = samples_data[match(heatmap_colnames, samples_data$Sample),c("Sample", "Cluster", "Fluke", "AA", "Viral", "Location")]
+zz_plot$ColID = 1:nrow(zz_plot)
+zz_plot = pivot_longer(zz_plot, cols=Cluster | Fluke | AA | Viral | Location)
+zz_plot$RowID = rep(c(5,4,3,2,1), nrow(zz_plot)/5)
+zz_plot$'name-value' = paste0(zz_plot$name, ":", zz_plot$value)
+zz_plot$color = "yellow"
+zz_plot[zz_plot$`name-value`=="Cluster:Normal", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Cluster:Normal_liver", 'color'] = 'brown'
+zz_plot[zz_plot$`name-value`=="Cluster:1", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Cluster:2", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Cluster:3", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Cluster:4", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Cluster:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Neg", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Pos", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:No", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="AA:Yes", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Viral:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value` %in% c("Viral:HBV", "Viral:HCV", "Viral:HBV+HCV"), 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Viral:Negative", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Location:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Location:Intrahepatic", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Location:Perihilar", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Location:Distal", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Location:Extrahepatic", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Location:Cystic duct", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Location:Liver", 'color'] = 'white'
+
+
+ggplot(data=zz_plot, mapping = aes(x=ColID, y=RowID)) +
+  geom_tile(aes(width = 1,height = 1 , fill = color)) +
+  scale_fill_manual(breaks=c("black","blue","green", "grey", "orange", "red", "white"), values = c("black","blue","green3", "grey", "orange", "red2", "white")) +
+  theme_void()
+
+
+
+col_breaks = c(seq(-2.5,-1.01,length=100),
+  seq(-1,1,length=100),
+  seq(1.01,2.5,length=100))
+heatmap_mat = heatmap.2(K27ac_plotdata, Colv = FALSE, Rowv = FALSE, dendrogram='none',  density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                        trace="none", scale='row', col=my_palette, breaks=col_breaks, ColSideColors=plot_samples$color, RowSideColors=plot_enhancers$color)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+### plot cell-line enhancers
+
+```{r fig.width=12}
+
+load(file="Rdata_cca_k27ac_3c_cells_diffbind.Rdata")
+rm(K27ac_cells_dba, K27ac_cells_enhsup_tisspeaks_dba)
+
+samples_info_cell = dba.show(K27ac_cells_tisspeaks_dba)
+samples_info_cell$Sample = as.character(samples_info_cell$ID)
+samples_info_cell$Tissue = as.character(samples_info_cell$Tissue)
+samples_info_cell$Condition = as.character(samples_info_cell$Condition)
+samples_info_cell[samples_info_cell$Tissue=="Normal", "Condition"] = "Normal"
+
+####### get deseq2 normalization factors
+# deseq2facs_cell = get_deseq2_normfacs(K27ac_cells_tisspeaks_dba, 
+#               samps=samples_info_cell[samples_info_cell$Condition %in% c("Normal", "Fluke-Pos"),"Sample"])
+
+
+# get factors based on raw counts, BUT SET NEGATIVES TO 0 FIRST!
+zz_K27ac_dba = dba(DBA=K27ac_cells_tisspeaks_dba, mask=K27ac_cells_tisspeaks_dba$masks$Normal | K27ac_cells_tisspeaks_dba$masks$`Fluke-Neg`) 
+zz_K27ac_dba = dba.count(zz_K27ac_dba, peaks=NULL, score=DBA_SCORE_READS_MINUS)
+zz_K27ac_data = zz_K27ac_dba$binding[, -1:-3]
+zz_K27ac_data[zz_K27ac_data < 0] = 0
+deseq2facs_cell = estimateSizeFactorsForMatrix(zz_K27ac_data)
+rm(zz_K27ac_dba, zz_K27ac_data)
+
+
+###### order the data to plot
+plot_samples_cell = samples_info_cell[, c("Sample", "Condition")]
+plot_samples_cell = plot_samples_cell[plot_samples_cell$Condition %in% c("Fluke-Neg", "Normal"),]
+plot_samples_cell = plot_samples_cell[order(factor(plot_samples_cell$Condition, levels=c("Fluke-Neg", "Normal"))),]
+# make sure plot_enhancers is obtained from above chunk
+
+
+###### get K27ac plotting data 
+K27ac_cells_tisspeaks_dba = dba.count(K27ac_cells_tisspeaks_dba, peaks=NULL, score=DBA_SCORE_READS_MINUS)
+K27ac_enhancers = paste0(K27ac_cells_tisspeaks_dba$peaks[[1]]$Chr, ":", K27ac_cells_tisspeaks_dba$peaks[[1]]$Start, "-", K27ac_cells_tisspeaks_dba$peaks[[1]]$End)
+K27ac_plotdata = K27ac_cells_tisspeaks_dba$binding[, -1:-3]
+K27ac_plotdata = K27ac_plotdata[match(plot_enhancers$enhancer, K27ac_enhancers), match(plot_samples_cell$Sample, colnames(K27ac_plotdata))]
+
+
+
+
+################ do deseq normalization 
+K27ac_plotdata[K27ac_plotdata < 0] = 0
+deseq2facs_cell = deseq2facs_cell[match(colnames(K27ac_plotdata), names(deseq2facs_cell))]
+K27ac_plotdata = t(t(K27ac_plotdata) / deseq2facs_cell)
+K27ac_plotdata = 1 + K27ac_plotdata
+K27ac_plotdata = log2(K27ac_plotdata)
+
+
+
+######## plot K27ac heatmap
+my_palette <- colorRampPalette(c("white", "darkgreen"))(n = 299)
+col_breaks = c(seq(0,2,length=100),
+  seq(2.01,4,length=100),
+  seq(4.01,6,length=100))
+plot_samples_cell$color = "yellow"
+plot_samples_cell[plot_samples_cell$Condition=='Fluke-Neg', 'color'] = 'red'
+plot_samples_cell[plot_samples_cell$Condition=='Normal', 'color'] = 'black'
+heatmap_mat = heatmap.2(K27ac_plotdata, Colv = FALSE, Rowv = FALSE, dendrogram='none', density.info = "none",  keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                        trace="none", scale='none', col=my_palette, breaks=col_breaks, ColSideColors=plot_samples_cell$color)
+
+
+```
+
+
+
+
+
+
+
+
+
+### plot tissue expression
+
+```{r fig.width=12}
+
+
+# read expression data: tissue counts. Ensure samples have same IDs as chipseq data!
+expr_counts_tiss_data = read.table("expression/counts_matrix_tissue_CCA_HCC/counts_matrix-genes.txt", stringsAsFactors = F, header=T, check.names = F, sep="\t") # 26589 rows, all unique gene names.
+rownames(expr_counts_tiss_data) = expr_counts_tiss_data$gene_name
+expr_counts_tiss_data = expr_counts_tiss_data[, !colnames(expr_counts_tiss_data) %in% c("gene_id", "gene_name")]
+expr_counts_tiss_data = round(expr_counts_tiss_data)
+
+# get samples to plot
+plot_samples = samples_data[samples_data$EGroup!="Normal_liver",]
+plot_samples = plot_samples[order(factor(plot_samples$EGroup, levels=c("Fluke", "C4", "Mixed", "Normal"))),]
+plot_samples = plot_samples[plot_samples$Sample %in% colnames(expr_counts_tiss_data),]
+
+# re-order samples in expression data
+expr_counts_tiss_data = expr_counts_tiss_data[, match(plot_samples$Sample, colnames(expr_counts_tiss_data))]
+
+# get deseq normalization factors
+deseq2facs_expr = estimateSizeFactorsForMatrix(expr_counts_tiss_data)
+
+# do deseq normalization
+deseq2facs_expr = deseq2facs_expr[match(colnames(expr_counts_tiss_data), names(deseq2facs_expr))]
+expr_counts_tiss_data = t(t(expr_counts_tiss_data) / deseq2facs_expr)
+expr_counts_tiss_data = 1 + expr_counts_tiss_data
+expr_counts_tiss_data = log2(expr_counts_tiss_data)
+
+# re-order genes in expression data. get plot_enhancers from chunk above!!!!
+expr_counts_tiss_data = expr_counts_tiss_data[match(plot_enhancers$gene, rownames(expr_counts_tiss_data)),]
+
+
+
+##### plot heatmap
+plot_samples$color = "yellow"
+plot_samples[plot_samples$EGroup=='Fluke', 'color'] = 'blue'
+plot_samples[plot_samples$EGroup=='C4', 'color'] = 'red2'
+plot_samples[plot_samples$EGroup=='Mixed', 'color'] = 'green3'
+plot_samples[plot_samples$EGroup=='Normal', 'color'] = 'black'
+
+# use blue - white - red
+my_palette <- colorRampPalette(c("blue", "white", "red"))(n = 299)
+# no row scaling
+col_breaks = c(seq(0,4,length=100),
+  seq(4.01,9,length=100),
+  seq(9.01,14,length=100))
+hm = heatmap.2(expr_counts_tiss_data,
+                 trace="none", scale="none", dendrogram="none", Rowv=NULL, Colv=NULL, density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                 col=my_palette, breaks=col_breaks, ColSideColors=plot_samples$color)
+
+# row scaling
+col_breaks = c(seq(-2.5,-1.01,length=100),
+  seq(-1,1,length=100),
+  seq(1.01,2.5,length=100))
+hm = heatmap.2(expr_counts_tiss_data,
+                 trace="none", scale="row", dendrogram="none", Rowv=NULL, Colv=NULL, density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                 col=my_palette, breaks=col_breaks,  ColSideColors=plot_samples$color)
+
+
+
+# plot tracks
+heatmap_colnames = rownames(hm$carpet)
+zz_plot = samples_data[match(heatmap_colnames, samples_data$Sample),c("Sample", "Cluster", "Fluke", "AA", "Viral", "Location")]
+zz_plot$ColID = 1:nrow(zz_plot)
+zz_plot = pivot_longer(zz_plot, cols=Cluster | Fluke | AA | Viral | Location)
+zz_plot$RowID = rep(c(5,4,3,2,1), nrow(zz_plot)/5)
+zz_plot$'name-value' = paste0(zz_plot$name, ":", zz_plot$value)
+zz_plot$color = "yellow"
+zz_plot[zz_plot$`name-value`=="Cluster:Normal", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Cluster:Normal_liver", 'color'] = 'brown'
+zz_plot[zz_plot$`name-value`=="Cluster:1", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Cluster:2", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Cluster:3", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Cluster:4", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Cluster:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Neg", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Fluke:Fluke-Pos", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:No", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="AA:Yes", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="AA:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Viral:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value` %in% c("Viral:HBV", "Viral:HCV", "Viral:HBV+HCV"), 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Viral:Negative", 'color'] = 'white'
+zz_plot[zz_plot$`name-value`=="Location:N/A", 'color'] = 'grey'
+zz_plot[zz_plot$`name-value`=="Location:Intrahepatic", 'color'] = 'orange'
+zz_plot[zz_plot$`name-value`=="Location:Perihilar", 'color'] = 'blue'
+zz_plot[zz_plot$`name-value`=="Location:Distal", 'color'] = 'green'
+zz_plot[zz_plot$`name-value`=="Location:Extrahepatic", 'color'] = 'red'
+zz_plot[zz_plot$`name-value`=="Location:Cystic duct", 'color'] = 'black'
+zz_plot[zz_plot$`name-value`=="Location:Liver", 'color'] = 'white'
+
+
+ggplot(data=zz_plot, mapping = aes(x=ColID, y=RowID)) +
+  geom_tile(aes(width = 1,height = 1 , fill = color)) +
+  scale_fill_manual(breaks=c("black","blue","green", "grey", "orange", "red", "white"), values = c("black","blue","green3", "grey", "orange", "red2", "white")) +
+  theme_void()
+
+
+```
+
+
+
+
+
+
+
+
+### plot cell lines expression
+
+```{r fig.width=12}
+
+
+# read expression data: cellline counts. Ensure samples have same IDs as chipseq data!
+expr_counts_cell_data = read.table("expression/counts_matrix_celllines/counts_matrix-genes.txt", stringsAsFactors = F, header=T, check.names = F, sep="\t") # 26589 rows, all unique gene names.
+rownames(expr_counts_cell_data) = expr_counts_cell_data$gene_name
+expr_counts_cell_data = expr_counts_cell_data[, !colnames(expr_counts_cell_data) %in% c("gene_id", "gene_name")]
+expr_counts_cell_data = round(expr_counts_cell_data)
+expr_counts_cell_data = expr_counts_cell_data[, grep("H69-KO|S5-EV|S5-MUT|S5-WT", colnames(expr_counts_cell_data), invert = T)]
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="Egi-1-1"] = "EGI1_R0"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="Egi-1-2"] = "EGI1_R1"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="H69-1"] = "H69_R0"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="H69-2"] = "H69_R1"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="HUCCT"] = "HUCCT_R1"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="KKU100"] = "KKU100_R1"
+colnames(expr_counts_cell_data)[colnames(expr_counts_cell_data)=="M213"] = "M214"
+
+# re-order samples in expression data. get plot_samples_cell from above. 
+plot_samples_cell_expr = plot_samples_cell[plot_samples_cell$Sample %in% colnames(expr_counts_cell_data),]
+expr_counts_cell_data = expr_counts_cell_data[, match(plot_samples_cell_expr$Sample, colnames(expr_counts_cell_data))]
+
+# get deseq normalization factors
+deseq2facs_cell_expr = estimateSizeFactorsForMatrix(expr_counts_cell_data)
+
+# do deseq normalization
+deseq2facs_cell_expr = deseq2facs_cell_expr[match(colnames(expr_counts_cell_data), names(deseq2facs_cell_expr))]
+expr_counts_cell_data = t(t(expr_counts_cell_data) / deseq2facs_cell_expr)
+expr_counts_cell_data = 1 + expr_counts_cell_data
+expr_counts_cell_data = log2(expr_counts_cell_data)
+
+# re-order genes in expression data. get plot_enhancers from chunk above!!!!
+expr_counts_cell_data = expr_counts_cell_data[match(plot_enhancers$gene, rownames(expr_counts_cell_data)),]
+
+
+
+# plot heatmap
+my_palette <- colorRampPalette(c("blue", "white", "red"))(n = 299)
+col_breaks = c(seq(0,3,length=100),
+  seq(4.01,9,length=100),
+  seq(9.01,14,length=100))
+hm = heatmap.2(expr_counts_cell_data,
+                 trace="none", scale="none", dendrogram="none", Rowv=NULL, Colv=NULL, density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                 col=my_palette, breaks=col_breaks, ColSideColors=plot_samples_cell_expr$color)
+  
+col_breaks = c(seq(-2.5,-1.01,length=100),
+  seq(-1,1,length=100),
+  seq(1.01,2.5,length=100))
+hm = heatmap.2(expr_counts_cell_data,
+                 trace="none", scale="row", dendrogram="none", Rowv=NULL, Colv=NULL, density.info = "none", keysize = 1, denscol="none", 
+                        rowsep=c(sum(plot_enhancers$gain)), sepcolor="black",
+                 col=my_palette, breaks=col_breaks,  ColSideColors=plot_samples_cell_expr$color)
+  
+
+```
+
+
+
+
+
+
+
+
+

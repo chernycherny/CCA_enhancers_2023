@@ -1,0 +1,190 @@
+---
+title: "CCA tissue enhancer analysis: Other analyses"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+# Motif analysis
+
+#### print gained enhancers in bed format  for Homer motif analysis
+```{r}
+
+# options(scipen=0)
+rm(list=ls())
+library(DiffBind, warn.conflicts=F, quietly=T)
+library(beeswarm)
+library(msigdbr)
+library(fgsea)
+library(gplots)
+library(clusterProfiler)
+library(biomaRt)
+library(ggplot2)
+source('analysis_cca_enhancers_functions.R')
+
+### read data
+load("Rdata_cca_k27ac_3b_somatic_enhancers_groupspec.Rdata")
+
+
+# read mSigDB genesets
+msigdb_H = msigdbr(species = "Homo sapiens", category = "H") # 50 genesets
+msigdb_H_list = msigdb_H %>% split(x = .$gene_symbol, f = .$gs_name)
+
+
+estro_genes = union(msigdb_H_list$HALLMARK_ESTROGEN_RESPONSE_EARLY, msigdb_H_list$HALLMARK_ESTROGEN_RESPONSE_LATE)
+oxphos_genes = msigdb_H_list$HALLMARK_OXIDATIVE_PHOSPHORYLATION
+ig_genes = msigdb_H_list$HALLMARK_INTERFERON_GAMMA_RESPONSE
+ia_genes = msigdb_H_list$HALLMARK_INTERFERON_ALPHA_RESPONSE
+il2_genes = msigdb_H_list$HALLMARK_IL2_STAT5_SIGNALING
+il6_genes = msigdb_H_list$HALLMARK_IL6_JAK_STAT3_SIGNALING
+imm_genes = union(union(union(ig_genes, ia_genes), il2_genes), il6_genes) 
+
+
+
+##### print bed files for Homer
+print_homer_bedfile = function(enhancers, filename, pad=0, splitRegion=F, splitSize=2000) {
+  enhancers_bed = lapply(unique(enhancers$enhancer), function(x){
+    enh_rows = enhancers[enhancers$enhancer==x,]
+    genes = paste0(unique(enh_rows$gene), collapse = ",")
+    chr = strsplit(x, "[:-]")[[1]][1]
+    start = as.integer(strsplit(x, "[:-]")[[1]][2]) - 1 - pad
+    end = as.integer(strsplit(x, "[:-]")[[1]][3]) + pad
+    enh_id = paste0(chr, ":", start, "-",  end, "_", genes)
+    data.frame(chr=chr, start=start, end=end, name=enh_id, score=1, strand="+", stringsAsFactors = F)
+  })
+  enhancers_bed = do.call(rbind, enhancers_bed)
+  if (splitRegion==T) {
+    enhancers_bed_split = apply(enhancers_bed, 1, function(enh){
+      chr = as.character(enh["chr"])
+      start = as.numeric(enh["start"])
+      end = as.numeric(enh["end"])
+      if (end-start > 1.5 * splitSize) {
+        splitstarts = seq(from=start, to=end, by=splitSize)
+        splitends = c(splitstarts[2:length(splitstarts)], end)
+        splitnames = paste0(as.character(enh["name"]), "_", 1:length(splitstarts))
+        data.frame(chr=chr, start=splitstarts, end=splitends, name=splitnames, score=1, strand="+", stringsAsFactors = F)
+      }
+      else {
+        enh
+      }
+    })
+    enhancers_bed_split = do.call(rbind, enhancers_bed_split)
+    enhancers_bed = enhancers_bed_split
+  }
+  write.table(enhancers_bed, file=filename, quote = F, row.names=F, col.names = F, sep="\t") 
+}
+
+```
+
+
+
+
+
+```{r}
+
+
+#### print Fluke group-specific-gained enhancers
+
+# get Fluke gained vs C4 & Mixed
+somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupC4$gain_exp_enhgain$gene)
+
+somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupMixed$gain_exp_enhgain$gene)
+
+EGroupFluke_intersect_enhgene = intersect(somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancergene, somatic_enhancers_groupspec$Tumor_EGroupFluke_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancergene)
+
+gained_Fluke = data.frame(enhancer=unlist(lapply(strsplit(EGroupFluke_intersect_enhgene, split='|', fixed=T), function(x){x[1]})),
+                gene=unlist(lapply(strsplit(EGroupFluke_intersect_enhgene, split='|', fixed=T), function(x){x[2]})), 
+                enhancergene=EGroupFluke_intersect_enhgene, stringsAsFactors = F)
+gained_Fluke$estro = unlist(lapply(gained_Fluke$gene, function(x){x %in% estro_genes}))
+print(paste0("Num validated enhancers: ", length(unique(gained_Fluke$enhancer))))
+print(paste0("Num validated enhancers assoc with estro genes: ", length(unique(gained_Fluke[gained_Fluke$estro, 'enhancer']))))
+print (paste0("Num validated enhancers' genes are estro genes: ", length(unique(gained_Fluke[gained_Fluke$estro, 'gene']))))
+
+
+#### print Fluke group-specific-gained enhancers
+print_homer_bedfile(gained_Fluke, "homer_gained_Fluke.bed", pad=100)
+
+
+#### print Fluke group-specific-gained estro enhancers
+print_homer_bedfile(gained_Fluke[gained_Fluke$estro,] , "homer_gained_Fluke_estro.bed", pad=100)
+
+```
+
+
+```{r}
+
+#### print C4 group-specific-gained enhancers
+
+# get C4 gained vs Fluke & Mixed
+somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupFluke$gain_exp_enhgain$gene)
+
+somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupMixed$gain_exp_enhgain$gene)
+
+EGroupC4_intersect_enhgene = intersect(somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancergene, somatic_enhancers_groupspec$Tumor_EGroupC4_vs_Tumor_EGroupMixed$gain_exp_enhgain$enhancergene)
+
+gained_C4 = data.frame(enhancer=unlist(lapply(strsplit(EGroupC4_intersect_enhgene, split='|', fixed=T), function(x){x[1]})),
+                gene=unlist(lapply(strsplit(EGroupC4_intersect_enhgene, split='|', fixed=T), function(x){x[2]})), 
+                enhancergene=EGroupC4_intersect_enhgene, stringsAsFactors = F)
+gained_C4$oxphos = unlist(lapply(gained_C4$gene, function(x){x %in% oxphos_genes}))
+print(paste0("Num validated enhancers: ", length(unique(gained_C4$enhancer))))
+print(paste0("Num validated enhancers assoc with oxphos genes: ", length(unique(gained_C4[gained_C4$oxphos, 'enhancer']))))
+print (paste0("Num validated enhancers' genes are oxphos genes: ", length(unique(gained_C4[gained_C4$oxphos, 'gene']))))
+
+
+#### print C4 group-specific-gained enhancers
+print_homer_bedfile(gained_C4, "homer_gained_C4.bed", pad=100)
+
+
+#### print C4 group-specific-gained oxphos enhancers
+print_homer_bedfile(gained_C4[gained_C4$oxphos,] , "homer_gained_C4_oxphos.bed", pad=100)
+```
+
+
+
+
+```{r}
+#### print Mixed group-specific-gained enhancers
+# get Mixed gained vs C4 & Fluke
+somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupC4$gain_exp_enhgain$gene)
+
+somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancergene = paste0(somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancer, '|', somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupFluke$gain_exp_enhgain$gene)
+
+EGroupMixed_intersect_enhgene = intersect(somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupC4$gain_exp_enhgain$enhancergene, somatic_enhancers_groupspec$Tumor_EGroupMixed_vs_Tumor_EGroupFluke$gain_exp_enhgain$enhancergene)
+
+gained_Mixed = data.frame(enhancer=unlist(lapply(strsplit(EGroupMixed_intersect_enhgene, split='|', fixed=T), function(x){x[1]})),
+                gene=unlist(lapply(strsplit(EGroupMixed_intersect_enhgene, split='|', fixed=T), function(x){x[2]})), 
+                enhancergene=EGroupMixed_intersect_enhgene, stringsAsFactors = F)
+gained_Mixed$imm = unlist(lapply(gained_Mixed$gene, function(x){x %in% imm_genes}))
+print(paste0("Num validated enhancers: ", length(unique(gained_Mixed$enhancer))))
+print(paste0("Num validated enhancers assoc with immune genes: ", length(unique(gained_Mixed[gained_Mixed$imm, 'enhancer']))))
+print (paste0("Num validated enhancers' genes are immune genes: ", length(unique(gained_Mixed[gained_Mixed$imm, 'gene']))))
+
+
+#### print Mixed group-specific-gained enhancers
+print_homer_bedfile(gained_Mixed, "homer_gained_Mixed.bed", pad=100)
+
+
+#### print Mixed group-specific-gained immune enhancers
+print_homer_bedfile(gained_Mixed[gained_Mixed$imm,] , "homer_gained_Mixed_immune.bed", pad=100)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

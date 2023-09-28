@@ -1,0 +1,428 @@
+---
+title: "CCA tissue enhancer analysis: Differential binding"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+&nbsp;
+  
+--------------------------------------------------------
+--------------------------------------------------------
+
+&nbsp;  
+  
+  
+# Differential enhancers
+
+
+## Run diffbind
+
+```{r include=F}
+
+### Run diffbind analysis
+
+rm(list=ls())
+
+library(DiffBind, warn.conflicts=F, quietly=T)
+library(DESeq2)
+source('analysis_cca_enhancers_functions.R')
+
+# read enhancer data 
+load("Rdata_cca_k27ac_0_prelim_final.Rdata")
+rm(K27ac_enhsup_dba, K27ac_origPeaks, superenhancers)
+
+
+# # read samples data
+# samples_data = read.table("C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/2019.08.05_samples_data.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+# 
+# # infer iCluster membership if methylation clusters are 1 or 4
+# samples_data$iCluster_infer = samples_data$`iCluster expanded`
+# samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019`==4, "iCluster_infer"] = 4
+# samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019`==1, "iCluster_infer"] = 1
+# samples_data[samples_data$iCluster_infer=="N/A" & samples_data$`Meth cluster 2019` %in% c("2","3"), "iCluster_infer"] = "2/3"
+# 
+# # infer AA based on country: set Italy, Japan, Thailand to No
+# samples_data$AA_infer = samples_data$AA
+# samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Italy", "AA_infer"] = "No"
+# samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Japan", "AA_infer"] = "No"
+# samples_data[samples_data$AA_infer=="N/A" & samples_data$Country=="Thailand", "AA_infer"] = "No"
+
+samples_data = read.table("2021.08.22 samples_info.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+
+# read expression data: counts. 
+expr_counts_data = read.table("expression/counts_matrix_tissue_CCA_HCC/counts_matrix-genes.txt", stringsAsFactors = F, header=T, check.names = F, sep="\t") # 26589 x 99 samples
+rownames(expr_counts_data) = expr_counts_data$gene_name
+expr_counts_data = expr_counts_data[, !colnames(expr_counts_data) %in% c("gene_id", "gene_name")]
+expr_counts_data = round(expr_counts_data)
+# Ensure samples have same IDs as chipseq data!
+colnames(expr_counts_data)[!colnames(expr_counts_data) %in% samples_data$`Sample`] # RNAseq samples without chipseq: 17 HCC samples, 11 CCA, 1 normal
+as.character(dba.show(K27ac_dba)$ID)[!as.character(dba.show(K27ac_dba)$ID)  %in% samples_data$`Sample`] # 0
+as.character(dba.show(K27ac_dba)$ID)[!as.character(dba.show(K27ac_dba)$ID)  %in% colnames(expr_counts_data)] # have chipseq but not rnaseq: 7
+colnames(expr_counts_data)[!colnames(expr_counts_data) %in% as.character(dba.show(K27ac_dba)$ID)] # Have RNAseq but not chipseq: 17 HCC samples, 11 CCA, 1 normal
+
+```
+
+
+
+
+
+```{r}
+###### Contrast set 1: EGroup Fluke Group
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+# Mixed Group
+zz_Mixed = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed","Sample"]) # 13
+zz_Mixed = as.character(dba.show(K27ac_dba)$ID) %in% zz_Mixed
+names(zz_Mixed) = as.character(dba.show(K27ac_dba)$ID)
+
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Fluke, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_Fluke", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Fluke, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_Fluke", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Fluke, group2=zz_C4, name1="Tumor_EGroup_Fluke", name2="Tumor_EGroup_C4")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Fluke, group2=zz_Mixed, name1="Tumor_EGroup_Fluke", name2="Tumor_EGroup_Mixed")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts1 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts1, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts1.Rdata")
+```
+
+
+```{r include=F}
+#### Perform differential expression analysis: Contrasts set 1
+diffexpr_coldata_list_contrasts1 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts1 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts1, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts1, diffexpr_list_contrasts1,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts1_diffexpr.Rdata")
+```
+
+
+
+```{r}
+###### Contrast set 2: EGroup C4
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+# Mixed Group
+zz_Mixed = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed","Sample"]) # 13
+zz_Mixed = as.character(dba.show(K27ac_dba)$ID) %in% zz_Mixed
+names(zz_Mixed) = as.character(dba.show(K27ac_dba)$ID)
+
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_C4, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_C4", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_C4, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_C4", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_C4, group2=zz_Fluke, name1="Tumor_EGroup_C4", name2="Tumor_EGroup_Fluke")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_C4, group2=zz_Mixed, name1="Tumor_EGroup_C4", name2="Tumor_EGroup_Mixed")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts2 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts2, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts2.Rdata")
+
+```
+
+
+
+```{r include=F}
+
+#### Perform differential expression analysis: Contrasts set 2
+diffexpr_coldata_list_contrasts2 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts2 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts2, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts2, diffexpr_list_contrasts2,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts2_diffexpr.Rdata")
+
+```
+
+
+
+```{r}
+
+###### Contrast set 3: EGroup Mixed
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+# Mixed Group
+zz_Mixed = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed","Sample"]) # 13
+zz_Mixed = as.character(dba.show(K27ac_dba)$ID) %in% zz_Mixed
+names(zz_Mixed) = as.character(dba.show(K27ac_dba)$ID)
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Mixed, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_Mixed", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Mixed, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_Mixed", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Mixed, group2=zz_Fluke, name1="Tumor_EGroup_Mixed", name2="Tumor_EGroup_Fluke")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_Mixed, group2=zz_C4, name1="Tumor_EGroup_Mixed", name2="Tumor_EGroup_C4")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts3 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts3, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3.Rdata")
+
+```
+
+
+
+```{r include=F}
+
+#### Perform differential expression analysis: Contrasts set 3
+diffexpr_coldata_list_contrasts3 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts3 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts3, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts3, diffexpr_list_contrasts3,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts3_diffexpr.Rdata")
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+###### Contrast set 4: CCA Clus3 within EGroup Mixed 
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group Clus3
+zz_MixedClus3 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & samples_data$Cluster=='3',"Sample"]) # 3
+zz_MixedClus3 = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedClus3
+names(zz_MixedClus3) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group NonClus3
+zz_MixedNonClus3 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & samples_data$Cluster!='3',"Sample"]) # 10
+zz_MixedNonClus3 = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedNonClus3
+names(zz_MixedNonClus3) = as.character(dba.show(K27ac_dba)$ID)
+
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedClus3, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_MixedClus3", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedClus3, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_MixedClus3", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedClus3, group2=zz_Fluke, name1="Tumor_EGroup_MixedClus3", name2="Tumor_EGroup_Fluke")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedClus3, group2=zz_C4, name1="Tumor_EGroup_MixedClus3", name2="Tumor_EGroup_C4")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedClus3, group2=zz_MixedNonClus3, name1="Tumor_EGroup_MixedClus3", name2="Tumor_EGroup_MixedNonClus3")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts4 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts4, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts4.Rdata")
+
+```
+
+
+
+```{r include=F}
+
+#### Perform differential expression analysis: Contrasts set 4
+diffexpr_coldata_list_contrasts4 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts4 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts4, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts4, diffexpr_list_contrasts4,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts4_diffexpr.Rdata")
+
+```
+
+
+
+
+```{r}
+
+###### Contrast set 5: AA within EGroup Mixed 
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group AA
+zz_MixedAA = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & samples_data$AA=='Yes',"Sample"]) # 5
+zz_MixedAA = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedAA
+names(zz_MixedAA) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group NonAA
+zz_MixedNonAA = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & samples_data$AA=='No',"Sample"]) # 6
+zz_MixedNonAA = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedNonAA
+names(zz_MixedNonAA) = as.character(dba.show(K27ac_dba)$ID)
+
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedAA, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_MixedAA", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedAA, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_MixedAA", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedAA, group2=zz_Fluke, name1="Tumor_EGroup_MixedAA", name2="Tumor_EGroup_Fluke")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedAA, group2=zz_C4, name1="Tumor_EGroup_MixedAA", name2="Tumor_EGroup_C4")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedAA, group2=zz_MixedNonAA, name1="Tumor_EGroup_MixedAA", name2="Tumor_EGroup_MixedNonAA")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts5 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts5, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts5.Rdata")
+
+```
+
+
+
+```{r include=F}
+
+#### Perform differential expression analysis: Contrasts set 5
+diffexpr_coldata_list_contrasts5 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts5 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts5, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts5, diffexpr_list_contrasts5,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts5_diffexpr.Rdata")
+
+```
+
+
+
+
+```{r}
+
+###### Contrast set 6: non-AA,C3 (including those with N/A values) within EGroup Mixed 
+
+# clear existing differential binding results
+K27ac_dba$contrasts = NULL
+
+
+# Fluke Group
+zz_Fluke = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Fluke","Sample"]) # 35
+zz_Fluke = as.character(dba.show(K27ac_dba)$ID) %in% zz_Fluke
+names(zz_Fluke) = as.character(dba.show(K27ac_dba)$ID)
+
+# C4 Group
+zz_C4 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="C4","Sample"]) # 15
+zz_C4 = as.character(dba.show(K27ac_dba)$ID) %in% zz_C4
+names(zz_C4) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group non-AAC3
+zz_MixedNonAAC3 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & samples_data$AA!='Yes' & samples_data$Cluster!='3',"Sample"]) # 5
+zz_MixedNonAAC3 = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedNonAAC3
+names(zz_MixedNonAAC3) = as.character(dba.show(K27ac_dba)$ID)
+
+
+# Mixed Group AAC3
+zz_MixedAAC3 = intersect(as.character(dba.show(K27ac_dba)$ID), samples_data[samples_data$EGroup=="Mixed" & (samples_data$AA=='Yes' | samples_data$Cluster==3),"Sample"]) # 8
+zz_MixedAAC3 = as.character(dba.show(K27ac_dba)$ID) %in% zz_MixedAAC3
+names(zz_MixedAAC3) = as.character(dba.show(K27ac_dba)$ID)
+
+
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedNonAAC3, group2=K27ac_dba$masks$Normal, name1="Tumor_EGroup_MixedNonAAC3", name2="Normal")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedNonAAC3, group2=K27ac_dba$masks$Normal_liver, name1="Tumor_EGroup_MixedNonAAC3", name2="Normal_liver")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedNonAAC3, group2=zz_Fluke, name1="Tumor_EGroup_MixedNonAAC3", name2="Tumor_EGroup_Fluke")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedNonAAC3, group2=zz_C4, name1="Tumor_EGroup_MixedNonAAC3", name2="Tumor_EGroup_C4")
+K27ac_dba <- dba.contrast(K27ac_dba, group1=zz_MixedNonAAC3, group2=zz_MixedAAC3, name1="Tumor_EGroup_MixedNonAAC3", name2="Tumor_EGroup_MixedAAC3")
+
+
+#### perform differential binding analysis: deseq2, effective library size
+K27ac_dba_deseq_contrasts6 <- dba.analyze(K27ac_dba, method=DBA_DESEQ2, bFullLibrarySize = F)
+
+# Takes a lot of time, so save it
+save(K27ac_dba_deseq_contrasts6, 
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts6.Rdata")
+
+```
+
+
+
+```{r include=F}
+
+#### Perform differential expression analysis: Contrasts set 6
+diffexpr_coldata_list_contrasts6 = create_diffexpr_contrasts(K27ac_dba$contrasts, colnames(expr_counts_data))
+diffexpr_list_contrasts6 = run_diffexpr_contrasts(diffexpr_coldata_list_contrasts6, expr_counts_data)
+
+# Takes a lot of time, so save it
+save(diffexpr_coldata_list_contrasts6, diffexpr_list_contrasts6,
+     file="Rdata_cca_k27ac_2b.2_diffbind_contrasts6_diffexpr.Rdata")
+
+```
+
+
+
+
