@@ -1,0 +1,236 @@
+---
+title: "CCA tissue enhancer analysis: Preliminary analysis"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+
+
+
+
+
+# read data
+
+Read samplesheet, read peaksets.  binding matrix is based on peak data
+```{r include=F}
+
+rm(list=ls())
+library(DiffBind, warn.conflicts=F, quietly=T)
+source('C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/analysis_cca_enhancers_functions.R')
+K27ac_enhancers_dba <- dba(sampleSheet="diffbind_samplesheet_K27ac_enhancers.csv")
+K27ac_enhancers_dba 
+```
+
+
+
+
+Peak overlap stats: Enhancers
+```{r}
+
+# enhancers 
+dba.overlap(K27ac_enhancers_dba, mode=DBA_OLAP_RATE) 
+dba.overlap(K27ac_enhancers_dba, K27ac_enhancers_dba$masks$Tumor, mode=DBA_OLAP_RATE) 
+dba.overlap(K27ac_enhancers_dba, K27ac_enhancers_dba$masks$Normal, mode=DBA_OLAP_RATE)
+
+```
+
+
+
+Consensus peaks widths
+```{r fig.width=12, fig.asp=.3}
+summary(K27ac_enhancers_dba$binding[,3] - K27ac_enhancers_dba$binding[,2])
+
+### Enhancer peaks
+# individual samples
+boxplot(x=lapply(K27ac_enhancers_dba$peaks, function(x){x[,3] - x[,2]}), log="y", main="Enhancer peaks, individual samples", ylab="Peak width", names=K27ac_enhancers_dba$samples$SampleID, cex.axis=.8, las=2)
+# merged peaks
+boxplot(x=K27ac_enhancers_dba$binding[,3] - K27ac_enhancers_dba$binding[,2], log="y", main="Enhancer peaks, merged", ylab="Peak width", cex.axis=.8, las=2)
+
+```
+
+
+
+
+
+
+Recount. Notes:  
+Cannot recount followed by minoverlap filter! Because after recount, all samples will have the same peakset.  
+Should not increase min_overlap to minimize batch effect, because I will miss out on sites specific to groups with fewer samples (eg. the Normals). 
+
+
+
+
+
+```{r include=F}
+### Recount enhancers
+rm(list=ls())
+library(DiffBind, warn.conflicts=F, quietly=T)
+K27ac_enhancers_dba <- dba(sampleSheet="diffbind_samplesheet_K27ac_enhancers.csv")
+
+K27ac_enhancers_dba_all = dba.count(K27ac_enhancers_dba, fragmentSize=150, minOverlap=2, summits=200) # x sites
+save(K27ac_enhancers_dba, K27ac_enhancers_dba_all,
+    file="C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/Rdata_cca_K27ac_0_prelim_recount_enhancers.Rdata")
+```
+
+
+Check consensus peaks width after recount
+```{r fig.width=12, fig.asp=.3}
+summary(K27ac_promoters_dba_all$binding[,3] - K27ac_promoters_dba_all$binding[,2])
+summary(K27ac_enhancers_dba_all$binding[,3] - K27ac_enhancers_dba_all$binding[,2])
+summary(K27ac_super_dba_all$binding[,3] - K27ac_super_dba_all$binding[,2])
+
+
+### Enhancer peaks
+# individual samples
+boxplot(x=lapply(K27ac_enhancers_dba_all$peaks, function(x){x[,3] - x[,2]}), log="y", main="Enhancer peaks, individual samples", ylab="Peak width", names=K27ac_enhancers_dba_all$samples$SampleID, cex.axis=.8, las=2)
+# merged peaks
+boxplot(x=K27ac_enhancers_dba_all$binding[,3] - K27ac_enhancers_dba_all$binding[,2], log="y", main="Enhancer peaks, merged", ylab="Peak width", cex.axis=.8, las=2)
+
+
+```
+
+
+
+
+
+
+
+# plot heatmap & PCA. exclude liver samples for clustering/pca
+```{r fig.width=10, fig.asp=.5}
+
+K27ac_enhancers_dba_excLiver = dba(DBA=K27ac_enhancers_dba_all, mask=!K27ac_enhancers_dba_all$masks$Normal_liver, minOverlap = 2) # 71 samples,   sites
+
+K27ac_enhancers_dba_excLiver
+dba.plotHeatmap(K27ac_enhancers_dba_excLiver, distMethod="pearson")
+dba.plotHeatmap(K27ac_enhancers_dba_excLiver, distMethod="spearman")
+
+
+# get clinical features
+aa_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[grep("Yes",samples_data$AA), "Sample ID"])
+fluke_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$Fluke=="Fluke-Pos", "Sample ID"])
+viral_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$HBV=="Positive" | samples_data$HCV=="Positive", "Sample ID"])
+intra_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$`Anatomical subtype`=="Intrahepatic", "Sample ID"])
+peri_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$`Anatomical subtype`=="Perihilar", "Sample ID"])
+distal_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$`Anatomical subtype`=="Distal", "Sample ID"])
+extra_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$`Anatomical subtype`=="Extrahepatic", "Sample ID"])
+cystic_idx = which(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$`Anatomical subtype`=="Cystic duct", "Sample ID"])
+col_clus = rep("grey", length(as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID)))
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$Tissue)=="Normal"] = "black"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$Tissue)=="Normal_liver"] = "brown"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$iCluster_infer=="1", "Sample ID"]] = "blue"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$iCluster_infer=="2", "Sample ID"]] = "orange"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$iCluster_infer=="3", "Sample ID"]] = "green"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$iCluster_infer=="2/3", "Sample ID"]] = "yellow"
+col_clus[as.character(dba.show(K27ac_enhancers_dba_excLiver)$ID) %in% samples_data[samples_data$iCluster_infer=="4", "Sample ID"]] = "red"
+
+
+
+# pca: rank transform
+K27ac_enhancers_excLiver_signals_rank = apply(K27ac_enhancers_excLiver_signals, 2, function(x){rank(x, ties.method = "average")})
+K27ac_enhancers_excLiver_signals_rank_pca = prcomp(t(K27ac_enhancers_excLiver_signals_rank), center=T, scale=T)
+# plot pca
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,2],
+     col=col_clus, pch=16)
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,3],
+     col=col_clus, pch=16)
+# plot pca with risk factors
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,2],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[aa_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[aa_idx,2], pch=2, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[fluke_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[fluke_idx,2], pch=1, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[viral_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[viral_idx,2], pch="V", cex=1, col="gray30")
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,3],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[aa_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[aa_idx,3], pch=2, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[fluke_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[fluke_idx,3], pch=1, cex=2.5, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[viral_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[viral_idx,3], pch="V", cex=1, col="gray30")
+# plot pca with subtype
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,2],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[peri_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[peri_idx,2], pch="p", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[distal_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[distal_idx,2], pch="d", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[extra_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[extra_idx,2], pch="e", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[cystic_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[cystic_idx,2], pch="c", cex=.9, col="gray30")
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,3],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[peri_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[peri_idx,3], pch="p", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[distal_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[distal_idx,3], pch="d", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[extra_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[extra_idx,3], pch="e", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[cystic_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[cystic_idx,3], pch="c", cex=.9, col="gray30")
+# plot pca with genotype
+layout(mat=matrix(c(1,2), 1, 2))
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,2],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1_idx,2], pch="b", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1trunc_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1trunc_idx,2], pch="B", cex=.9, col="gray30")
+plot(x=K27ac_enhancers_excLiver_signals_rank_pca$x[,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[,3],
+     col=col_clus, pch=16)
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1_idx,3], pch="b", cex=.9, col="gray30")
+points(x=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1trunc_idx,1], y=K27ac_enhancers_excLiver_signals_rank_pca$x[bap1trunc_idx,3], pch="B", cex=.9, col="gray30")
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r include=F}
+options(scipen=999)
+
+
+
+########### Save the dba objects for downstream analysis ###
+# save the original peaksets for downstream analysis
+K27ac_dba_origPeaks = dba(DBA=K27ac_enhancers_dba)
+K27ac_origPeaks = K27ac_dba_origPeaks$peaks
+names(K27ac_origPeaks) = as.character(dba.show(K27ac_dba_origPeaks)$ID)
+K27ac_origPeaks = lapply(K27ac_origPeaks, function(x){
+  data.frame(chr=x$V1, start=x$V2, end=x$V3, stringsAsFactors = F)
+})
+
+# save enhancers and enh+sup DBAs
+K27ac_dba = K27ac_enhancers_dba_all 
+K27ac_dba$contrasts = NULL
+
+# output deseq2 normalization factors for signal tracks normalization
+deseq2facs_all_enh = get_deseq2_normfacs(K27ac_enhancers_dba_all)
+write.table(deseq2facs_all_enh, file="20190521_cca_K27ac_Deseq2NormFacs.txt", quote=F, row.names=T, sep="\t", col.names=F)
+
+
+save(K27ac_dba, K27ac_origPeaks, file="C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/Rdata_cca_k27ac_0_prelim_final.Rdata")
+
+
+
+
+
+
+```
+
+
+
+
