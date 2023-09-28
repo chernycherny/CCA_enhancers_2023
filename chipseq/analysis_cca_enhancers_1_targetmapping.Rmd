@@ -1,0 +1,380 @@
+---
+title: "CCA tissue enhancer analysis: Target gene mapping"
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+
+---
+
+
+
+&nbsp;
+  
+--------------------------------------------------------
+--------------------------------------------------------
+
+&nbsp;  
+  
+  
+  
+# Enhancers
+
+Actual target gene mapping is done in analysis_cca_enhancers_1_targetmapping.R  
+Try 3 different ways to calculate enhancer signal:  
+1. TMM-Minus, full library size. Accounts for library size but not enhancer size.  
+2. RPKM. Accounts for library size and enhancer size, but doesn't do input subtraction.  
+3. CPLW: Input-subtracted counts, divided by log enhancer width (ie kind of like density). Accounts for enhancer size but not library size, does input subtraction. Not necessary to account for lib size because I rank normalize! We don't do counts-minus per kb, because longer enhancers will have lower density! Thus take log width instead.
+
+```{r include=F}
+rm(list=ls())
+library(GenomicRanges)
+library(beeswarm)
+library(DiffBind)
+
+# read promoter signals. This is to plot enhancer-promoter K27ac correlations per sample
+# convert the promoter K27ac promoter ids from promoter regions to TSS
+load("Rdata_cca_k27ac_1_targetmapping_promotersignal.RData")
+rm(K27ac_dba_promoter_split)
+K27ac_promoter$promoter_id = sapply(strsplit(K27ac_promoter$coord, split="[:-]"), function(x){
+  chr = as.character(x[1])
+  pos = mean(as.numeric(c(x[2], x[3]))) - 1
+  paste0(chr, ":", pos, "-", pos)
+})
+K27ac_promoter$promoter_id = paste0(K27ac_promoter$promoter_id, "_", K27ac_promoter$gene)
+
+
+### read enhancer data 
+load("Rdata_cca_k27ac_0_prelim_final.Rdata")
+rm(K27ac_enhsup_dba, superenhancers)
+
+## enhancer signals using TMM-minus (full lib size). This accounts for lib size, but not enhancer size
+K27ac_dba = dba.count(K27ac_dba, peaks=NULL, score=DBA_SCORE_TMM_MINUS_FULL)
+K27ac_enhancer_signalsTMM = dba.peakset(K27ac_dba, bRetrieve = T, DataType = DBA_DATA_FRAME) # 474060 enhancers
+rownames(K27ac_enhancer_signalsTMM) = paste0(K27ac_enhancer_signalsTMM$CHR, ":", K27ac_enhancer_signalsTMM$START, "-", K27ac_enhancer_signalsTMM$END)
+K27ac_enhancer_signalsTMM = K27ac_enhancer_signalsTMM[, 4:ncol(K27ac_enhancer_signalsTMM)]
+# casting to dataframe may change some of the sample names, so rename them. First check that sample ordering is as expected
+as.character(dba.show(K27ac_dba)$ID)
+colnames(K27ac_enhancer_signalsTMM)
+# rename samples
+colnames(K27ac_enhancer_signalsTMM) = as.character(dba.show(K27ac_dba)$ID)
+
+## enhancer signals using RPKM. This accounts for lib size and enhancer size, but doesn't minus control reads
+K27ac_dba = dba.count(K27ac_dba, peaks=NULL, score=DBA_SCORE_RPKM)
+K27ac_enhancer_signalsRPKM = dba.peakset(K27ac_dba, bRetrieve = T, DataType = DBA_DATA_FRAME) # 474060 enhancers
+rownames(K27ac_enhancer_signalsRPKM) = paste0(K27ac_enhancer_signalsRPKM$CHR, ":", K27ac_enhancer_signalsRPKM$START, "-", K27ac_enhancer_signalsRPKM$END)
+K27ac_enhancer_signalsRPKM = K27ac_enhancer_signalsRPKM[, 4:ncol(K27ac_enhancer_signalsRPKM)]
+# rename samples
+colnames(K27ac_enhancer_signalsRPKM) = as.character(dba.show(K27ac_dba)$ID)
+
+### enhancer signals using counts-minus per log width (ie kind of like density). This accounts for enhancer size, but not lib size, but libsize doesn't matter because we rank-normalize later.
+# We don't do counts-minus per kb, because longer enhancers will have lower density! Thus take log width instead.
+# After rank normalization, this is almost equivalent to using TMM / logwidth, EXCEPT that TMM has pseudocount of 1, but CPLW does not.
+K27ac_dba = dba.count(K27ac_dba, peaks=NULL, score=DBA_SCORE_READS_MINUS)
+K27ac_enhancer_signalsCPLW = dba.peakset(K27ac_dba, bRetrieve = T, DataType = DBA_DATA_FRAME) # 474060 enhancers
+rownames(K27ac_enhancer_signalsCPLW) = paste0(K27ac_enhancer_signalsCPLW$CHR, ":", K27ac_enhancer_signalsCPLW$START, "-", K27ac_enhancer_signalsCPLW$END)
+# divide by log enhancer widths
+K27ac_enhancer_signalsCPLW = t(apply(K27ac_enhancer_signalsCPLW, 1, function(x){
+  enh_width = as.numeric(x["END"]) - as.numeric(x["START"]) + 1
+  CPLW = as.numeric(x[4:ncol(K27ac_enhancer_signalsCPLW)]) 
+  CPLW = sapply(CPLW, function(y){max(y,0)}) # Don't use pseudocount 1! Because that will set smaller enhancers to higher activity, among enhancers with no activity! 
+  CPLW = CPLW / log2(enh_width)
+  CPLW
+}))
+K27ac_enhancer_signalsCPLW = data.frame(K27ac_enhancer_signalsCPLW)
+# rename samples
+colnames(K27ac_enhancer_signalsCPLW) = as.character(dba.show(K27ac_dba)$ID)
+
+
+
+# read mapping
+target_map_TMM = read.table("target_gene_mapping/20190628_enhancer_target_map_noTAD_TMM_rho.3.txt", header=T, stringsAsFactors = F) 
+target_map_RPKM = read.table("target_gene_mapping/20190628_enhancer_target_map_noTAD_RPKM_rho.3.txt", header=T, stringsAsFactors = F) 
+target_map_CPLW = read.table("target_gene_mapping/20190628_enhancer_target_map_noTAD_CPLW_rho.3.txt", header=T, stringsAsFactors = F) 
+target_map_CPLW_liberal = read.table("target_gene_mapping/20190628_enhancer_target_map_noTAD_CPLW_rho.3_liberal.txt", header=T, stringsAsFactors = F) 
+length(unique(rownames(K27ac_enhancer_signalsTMM))) == length(unique(target_map_TMM$enhancer))
+length(unique(rownames(K27ac_enhancer_signalsRPKM))) == length(unique(target_map_RPKM$enhancer))
+length(unique(rownames(K27ac_enhancer_signalsCPLW))) == length(unique(target_map_CPLW$enhancer))
+length(unique(rownames(K27ac_enhancer_signalsCPLW))) == length(unique(target_map_CPLW_liberal$enhancer))
+
+# # read samples data
+# samples_data = read.table("C:/Users/cherny/Google Drive/CCA-epigenetics/CCA_enhancers_project/2019.02.03_samples_data.txt", stringsAsFactors = F, header=T, sep="\t", check.names = F)
+
+
+# read expression data
+expr_data = read.table("expression/counts_matrix_tissue_CCA_HCC/tpm_matrix-genes.txt", stringsAsFactors = F, header=T, check.names = F, sep="\t") # 24622 rows, all unique gene names.
+rownames(expr_data) = expr_data$gene_name
+expr_data = expr_data[, !colnames(expr_data) %in% c("gene_id", "gene_name")]
+expr_data = expr_data[, colnames(expr_data) %in% as.character(dba.show(K27ac_dba)$ID)] # 24622 genes x 63 samples
+
+
+```
+
+
+## Statistics of mapped enhancers
+```{r fig.width=12, fig.asp=.4}
+
+plot_mapping_stats = function(my_target_map) {
+  
+  layout(mat=matrix(c(1,2), 1, 2))
+   # plot pie chart of overall mapped enhancers
+  pie(x=c(length(unique(my_target_map[!is.na(my_target_map$gene), "enhancer"])), length(unique(my_target_map[is.na(my_target_map$gene), "enhancer"]))), 
+      labels=c(paste0("Mapped: ", length(unique(my_target_map[!is.na(my_target_map$gene), "enhancer"]))), 
+               paste0("Unmapped: ", length(unique(my_target_map[is.na(my_target_map$gene), "enhancer"])))), 
+      main = paste0("Enhancers: ", length(unique(my_target_map$enhancer))), col = c("Grey", "white"))
+  # plot pie chart of overall mapped genes
+  promoters = read.table("target_gene_mapping/genes_refseq_curated_onlyNM.tss1kb.bed",stringsAsFactors = F, header=F, sep="\t")
+  pie(x=c(length(unique(na.omit(my_target_map$gene))), length(unique(na.omit(promoters$V4))) - length(unique(na.omit(my_target_map$gene)))), 
+      labels=c(paste0("Mapped: ", length(unique(na.omit(my_target_map$gene)))), paste0("Unmapped: ",length(unique(na.omit(promoters$V4))) - length(unique(na.omit(my_target_map$gene))))), 
+      main = paste0("Genes: ", length(unique(na.omit(promoters$V4)))), col = c("Grey", "white"))
+  
+  # for each sample, get number enhancers mapped or unmapped, plot barchart
+  mapped_enh_gr = as(my_target_map[!is.na(my_target_map$gene), "enhancer"], "GRanges") # 42869
+  samples_num_mapped = lapply(K27ac_origPeaks, function(x){
+    peaks_gr = as(x, "GRanges")
+    peaks_enh_overlap = data.frame(findOverlaps(peaks_gr, mapped_enh_gr))
+    num_peaks_mapped = length(unique(peaks_enh_overlap$queryHits))
+    data.frame(Total=nrow(x), Mapped=num_peaks_mapped, Unmapped=nrow(x)-num_peaks_mapped)
+  })
+  samples_num_mapped = do.call(rbind, samples_num_mapped)
+  # sort: tumors first then normals then normal livers, and sort by num enhancers
+  samples_num_mapped_T = samples_num_mapped[1:63,]
+  samples_num_mapped_T = samples_num_mapped_T[order(samples_num_mapped_T$Total, decreasing = T),]
+  samples_num_mapped_N = samples_num_mapped[64:71,]
+  samples_num_mapped_N = samples_num_mapped_N[order(samples_num_mapped_N$Total, decreasing = T),]
+  samples_num_mapped_L = samples_num_mapped[72:77,]
+  samples_num_mapped_L = samples_num_mapped_L[order(samples_num_mapped_L$Total, decreasing = T),]
+  samples_num_mapped = rbind(samples_num_mapped_T, samples_num_mapped_N, samples_num_mapped_L)
+  layout(mat=matrix(c(1,2), 1, 2), widths=c(4,1))
+  barplot(t(samples_num_mapped[, 2:3]), cex.names=.7, col=c("grey", "white"), las=2, ylab="Num enhancers")
+  abline(v=75.8)
+  abline(v=85.5)
+  text(x=c(40, 80, 89), y=grconvertY(.95, from="npc"), labels=c("Tumor", "Normal","Liver"))
+  plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=c(0,1), ylim=0:1)
+  legend("topleft", legend =c("Mapped", "Unmapped"),  fill = c("grey", "white"), cex=.8)
+  
+  layout(mat=matrix(c(1,2,3), 1, 3), widths=c(1,1,1))
+  # enhancer-gene expression correlation 
+  boxplot(my_target_map[!is.na(my_target_map$rho), "rho"], ylab="Spearman rho", main="Enhancer K27ac - target gene expression correlation", ylim=c(0,1))
+  # enhancer-promoter K27ac correlation 
+  boxplot(my_target_map[!is.na(my_target_map$promK27ac_rho), "promK27ac_rho"], ylab="Spearman rho", main="Enhancer-promoter K27ac correlation", ylim=c(-1,1))
+  abline(h=0)
+  # distance to target
+  boxplot(my_target_map[!is.na(my_target_map$gene), "dist"], ylab="Distance", main="Distance from enhancer to target promoter")
+  print(summary(my_target_map[!is.na(my_target_map$gene), "dist"]))
+  
+  corcoef = cor.test(my_target_map$rho, my_target_map$promK27ac_rho, method="spearman")
+  smoothScatter(x=my_target_map$rho, y=my_target_map$promK27ac_rho, xlab="Enhancer K27ac - Target expression corr", ylab="Enhancer K27ac - Target K27ac corr")
+  abline(lm(my_target_map$promK27ac_rho ~ my_target_map$rho))
+  text(x=grconvertX(0.5, from="npc"), y=grconvertY(.97, from="npc"), labels=paste0("Spearman rho=",signif(corcoef$estimate,digits=4), ", P=",signif(corcoef$p.value, digits=4)))
+}
+
+plot_mapping_stats(target_map_TMM)
+
+
+```
+
+```{r fig.width=12, fig.asp=.4}
+
+plot_mapping_stats(target_map_RPKM)
+
+
+```
+
+```{r fig.width=12, fig.asp=.4}
+plot_mapping_stats(target_map_CPLW)
+```
+
+```{r fig.width=12, fig.asp=.4}
+plot_mapping_stats(target_map_CPLW_liberal)
+```
+
+
+
+## Enhancer-target expression correlation
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_exp_corr = function(my_target_map, enh_signals, expr) {
+  
+  options(scipen=0)
+  chipseq_norm_samples = c("807N", "260418N", "3011118N", "4081118N", "Z12243N", "Z12267N", "Z12249N", "Z12244N") 
+  chipseq_liver_samples = c("21914187N",  "29150572N", "E066_liver", "HCC_124N", "HCC_9N", "HCC_29N") 
+  
+  target_map_mapped = my_target_map[!is.na(my_target_map$gene),]
+  target_map_mapped = target_map_mapped[, colnames(target_map_mapped) %in% c("enhancer", "gene", "promoter")]
+  
+  # get mapped enhancers, arrange in same order as target_map_mapped
+  enh_signals_mapped = enh_signals[rownames(enh_signals) %in% target_map_mapped$enhancer,] # 53371 mapped enhancers
+  enh_signals_mapped$enhancer = rownames(enh_signals_mapped)
+  enh_signals_mapped = enh_signals_mapped[match(target_map_mapped$enhancer, enh_signals_mapped$enhancer),] # 94064 rows
+  all.equal(enh_signals_mapped$enhancer, target_map_mapped$enhancer)
+  enh_signals_mapped = enh_signals_mapped[, colnames(enh_signals_mapped)!="enhancer"]
+  # keep only samples with expr
+  enh_signals_mapped = enh_signals_mapped[, colnames(enh_signals_mapped) %in% colnames(expr_data)] # 94064 x 14
+  # take log2
+  enh_signals_mappedlog = apply(enh_signals_mapped, 2, function(x){sapply(x, function(y){max(y,.1)})})
+  enh_signals_mappedlog = log2(enh_signals_mappedlog)
+  
+  # get mapped genes expr, take log2, arrange in same order as target_map_mapped
+  expr_mapped = expr[rownames(expr) %in% target_map_mapped$gene,] # 13618 mapped genes
+  expr_mapped$gene = rownames(expr_mapped)
+  expr_mapped = expr_mapped[match(target_map_mapped$gene, expr_mapped$gene),] # 94064 rows
+  all.equal(expr_mapped$gene, target_map_mapped$gene)
+  expr_mapped = expr_mapped[, colnames(expr_mapped)!="gene"]
+  # keep only samples with expr
+  expr_mapped = expr_mapped[, match(colnames(enh_signals_mapped), colnames(expr_mapped))] # 94064 x 14
+  # take log2
+  expr_mappedlog = apply(expr_mapped, 2, function(x){sapply(x, function(y){max(y,.1)})})
+  expr_mappedlog = log2(expr_mappedlog)
+  
+  
+  # scatterplot, calculate correlations
+  layout(mat=matrix(1:3, 1, 3, byrow = T))
+  samples_enh_gene_corr = lapply(colnames(enh_signals_mapped), function(samp){
+    corcoef = cor.test(enh_signals_mapped[, samp], expr_mapped[,samp], method="spearman")
+    smoothScatter(x=enh_signals_mappedlog[, samp], y=expr_mappedlog[,samp], xlab="Enhancer K27ac", ylab="Target gene expression", main=samp)
+    abline(lm(expr_mappedlog[,samp] ~ enh_signals_mappedlog[, samp]))
+    text(x=grconvertX(0.5, from="npc"), y=grconvertY(.97, from="npc"), labels=paste0("Spearman rho=",signif(corcoef$estimate,digits=4), ", P=",signif(corcoef$p.value, digits=4)))
+    data.frame(rho=corcoef$estimate, p=corcoef$p.value)
+  })
+  samples_enh_gene_corr = do.call(rbind,samples_enh_gene_corr)
+  rownames(samples_enh_gene_corr) = colnames(enh_signals_mapped)
+  
+  # beeswarm plot correlation coefficients for the samples
+  layout(mat=matrix(c(1,2), 1, 2), widths=c(1,1))
+  beeswarm(samples_enh_gene_corr[!rownames(samples_enh_gene_corr) %in% chipseq_norm_samples, "rho"], method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(0,0,100,80,maxColorValue=255), col="blue", ylab="Spearman rho", main="Enhancer-target expression correlation", at=1, cex.main=.7)
+  beeswarm(samples_enh_gene_corr[rownames(samples_enh_gene_corr) %in% chipseq_norm_samples, "rho"], method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(100,100,100,80,maxColorValue=255), col="black", ylab="Spearman rho", at=1, add=T)
+  beeswarm(samples_enh_gene_corr[rownames(samples_enh_gene_corr) %in% chipseq_liver_samples, "rho"], method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(0,100,0,80,maxColorValue=255), col="green", ylab="Spearman rho", at=1, add=T)
+  segments(x0=.8, y0=median(samples_enh_gene_corr$rho), x1=1.2, y1=median(samples_enh_gene_corr$rho), col=rgb(0,0,0,maxColorValue=255), lwd=3)
+  abline(h=0)
+  plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=c(0,1), ylim=0:1)
+  legend("left", legend =c("Tumor", "Normal", "Liver"), pch=21, col=c("blue","black", "green"))
+}
+
+plot_enhancer_target_exp_corr(target_map_TMM, K27ac_enhancer_signalsTMM, expr_data)
+
+```
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_exp_corr(target_map_RPKM, K27ac_enhancer_signalsRPKM, expr_data)
+```
+
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_exp_corr(target_map_CPLW, K27ac_enhancer_signalsCPLW, expr_data)
+```
+
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_exp_corr(target_map_CPLW_liberal, K27ac_enhancer_signalsCPLW, expr_data)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Enhancer-promoter K27ac correlation
+```{r fig.width=8, fig.asp=.7}
+plot_enhancer_target_K27ac_corr = function(my_target_map, enh_signals, prom_signals) {
+  options(scipen=0)
+  chipseq_norm_samples = c("807N", "260418N", "3011118N", "4081118N", "Z12243N", "Z12267N", "Z12249N", "Z12244N") 
+  chipseq_liver_samples = c("21914187N",  "29150572N", "E066_liver", "HCC_124N", "HCC_9N", "HCC_29N") 
+  target_map_mapped = my_target_map[!is.na(my_target_map$gene),] # 94064 rows, 53371 enhancers, 18911 promoters
+  target_map_mapped = target_map_mapped[, colnames(target_map_mapped) %in% c("enhancer", "gene", "promoter")]
+  
+  # get mapped enhancers, arrange in same order as target_map_mapped
+  enh_signals_mapped = enh_signals[rownames(enh_signals) %in% target_map_mapped$enhancer,] 
+  enh_signals_mapped$enhancer = rownames(enh_signals_mapped)
+  enh_signals_mapped = enh_signals_mapped[match(target_map_mapped$enhancer, enh_signals_mapped$enhancer),] 
+  all.equal(enh_signals_mapped$enhancer, target_map_mapped$enhancer)
+  enh_signals_mapped = enh_signals_mapped[, colnames(enh_signals_mapped)!="enhancer"]
+  # take log2
+  enh_signals_mappedlog = apply(enh_signals_mapped, 2, function(x){sapply(x, function(y){max(y,.1)})})
+  enh_signals_mappedlog = log2(enh_signals_mappedlog)
+  
+  # get mapped promoters, arrange in same order as target_map_mapped
+  prom_signals_mapped = prom_signals[prom_signals$promoter_id %in% target_map_mapped$promoter,] # 18911 mapped promoters
+  prom_signals_mapped$promoter = prom_signals_mapped$promoter_id
+  prom_signals_mapped = prom_signals_mapped[, !colnames(prom_signals_mapped) %in% c("coord","gene","promoter_id","chr","start","end")]
+  prom_signals_mapped = prom_signals_mapped[match(target_map_mapped$promoter, prom_signals_mapped$promoter),] # 94064 rows
+  all.equal(prom_signals_mapped$promoter, target_map_mapped$promoter)
+  prom_signals_mapped = prom_signals_mapped[, colnames(prom_signals_mapped)!="promoter"]
+  # take log2
+  prom_signals_mappedlog = apply(prom_signals_mapped, 2, function(x){sapply(x, function(y){max(y,.1)})})
+  prom_signals_mappedlog = log2(prom_signals_mappedlog)
+  
+  # scatterplot, calculate correlations
+  layout(mat=matrix(1:3, 1, 3, byrow = T))
+  samples_enh_promoter_corr = lapply(colnames(enh_signals_mapped), function(samp){
+    corcoef = cor.test(enh_signals_mapped[, samp], prom_signals_mapped[,samp], method="spearman")
+    smoothScatter(x=enh_signals_mappedlog[, samp], y=prom_signals_mappedlog[,samp], xlab="Enhancer K27ac", ylab="Promoter K27ac", main=samp)
+    abline(lm(prom_signals_mappedlog[,samp] ~ enh_signals_mappedlog[, samp]))
+    text(x=grconvertX(0.5, from="npc"), y=grconvertY(.97, from="npc"), labels=paste0("Spearman rho=",signif(corcoef$estimate,digits=4), ", P=",signif(corcoef$p.value, digits=4)))
+    data.frame(rho=corcoef$estimate, p=corcoef$p.value)
+  })
+  samples_enh_promoter_corr = do.call(rbind,samples_enh_promoter_corr)
+  rownames(samples_enh_promoter_corr) = colnames(enh_signals_mapped)
+  
+  
+  # beeswarm plot correlation coefficients for the samples
+  layout(mat=matrix(c(1,2), 1, 2), widths=c(1,1))
+  beeswarm(samples_enh_promoter_corr[!rownames(samples_enh_promoter_corr) %in% chipseq_norm_samples, "rho"], 
+           method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(0,0,100,80,maxColorValue=255), col="blue", ylab="Spearman rho", main="Enhancer-promoter K27ac correlation", at=1, cex.main=.7)
+  beeswarm(samples_enh_promoter_corr[rownames(samples_enh_promoter_corr) %in% chipseq_norm_samples, "rho"], 
+           method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(100,100,100,80,maxColorValue=255), col="black", ylab="Spearman rho", at=1, add=T)
+  beeswarm(samples_enh_promoter_corr[rownames(samples_enh_promoter_corr) %in% chipseq_liver_samples, "rho"], 
+           method="swarm", corral="random", spacing=1, pch=21, cex=1.5, ylim=c(-.1,.8),
+           bg=rgb(100,100,100,80,maxColorValue=255), col="green", ylab="Spearman rho", at=1, add=T)
+  segments(x0=.8, y0=median(samples_enh_promoter_corr$rho), x1=1.2, y1=median(samples_enh_promoter_corr$rho), col=rgb(0,0,0,maxColorValue=255), lwd=3)
+  abline(h=0)
+  plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=c(0,1), ylim=0:1)
+  legend("left", legend =c("Tumor", "Normal", "Liver"), pch=21, col=c("blue","black", "green"))
+}
+
+plot_enhancer_target_K27ac_corr(target_map_TMM, K27ac_enhancer_signalsTMM, K27ac_promoter)
+
+
+```
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_K27ac_corr(target_map_RPKM, K27ac_enhancer_signalsRPKM, K27ac_promoter)
+```
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_K27ac_corr(target_map_CPLW, K27ac_enhancer_signalsCPLW, K27ac_promoter)
+```
+
+
+```{r fig.width=8, fig.asp=.7}
+
+plot_enhancer_target_K27ac_corr(target_map_CPLW_liberal, K27ac_enhancer_signalsCPLW, K27ac_promoter)
+```
+
+## Example genes
+```{r}
+target_map_mapped = target_map_CPLW_liberal[!is.na(target_map_CPLW_liberal$gene),] # 172717 rows, 76837 enhancers, 12725 genes
+target_map_mapped = target_map_mapped[target_map_mapped$rho > .75 & target_map_mapped$promK27ac_rho > .75,] # 99 rows, 71 enhancers, 51 genes
+target_map_mapped = target_map_mapped[order(target_map_mapped$rho, decreasing = T),]
+target_map_mapped[1:30,]
+```
+
+
+
