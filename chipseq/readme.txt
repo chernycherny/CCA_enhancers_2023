@@ -6,5 +6,6 @@ analysis_cca_enhancers_0_preliminary.Rmd: R script containing commands to analyz
 analysis_cca_enhancers_0b_unsup_clustering.Rmd: R script containing commands for unsupervised clustering and consensus clustering
 analysis_cca_enhancers_1_targetmapping.R: R script containing commands to map enhancers to target genes
 analysis_cca_enhancers_1_targetmapping.Rmd: R script containing commands to analyze enhancer-gene mapping
-
+analysis_cca_enhancers_2b.2_diffbind_new.Rmd: R script containing commands to setup and run differential binding analyses
+analysis_cca_enhancers_2h_other_analyses.Rmd: R script containing commands for motif analysis with Homer
 
