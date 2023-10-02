@@ -1,6 +1,7 @@
 This directory contains:
 
-xxx
+rnaseq_pipeline.sh: shell script containing commands to process the RNA-seq data.
+rnaseq_pipeline_build_references.sh: shell script containing commands to build the reference for aligning RNA-seq data.
 
 The source codes are not meant to be run from start to finish. It won't work because:
 1. The data files are not included here (please download and process the data files as required, see Data Availability in the paper)
